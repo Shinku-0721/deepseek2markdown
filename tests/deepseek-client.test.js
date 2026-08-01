@@ -83,7 +83,7 @@ test('会话分页使用 DeepSeek 复合游标并报告累计进度', async () =
   assert.equal(secondRequestUrl.searchParams.get('lte_cursor.updated_at'), '100');
   assert.equal(secondRequestUrl.searchParams.get('lte_cursor.id'), 'session-100');
   assert.deepEqual(progress, [{ page: 1, total: 100 }, { page: 2, total: 101 }]);
-  assert.deepEqual(waits, []);
+  assert.deepEqual(waits, [300]);
 });
 
 test('瞬时 HTTP 错误按退避间隔重试后恢复', async () => {

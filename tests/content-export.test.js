@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 function createHarness({
+  cacheRecords = new Map(),
+  downloadHandler = null,
   downloadError = null,
   historyError = null,
   historyLoader = null,
@@ -16,6 +18,9 @@ function createHarness({
   let tokenListener = null;
   let releaseHistory = null;
   let downloadCalls = 0;
+  let historyCalls = 0;
+  let cacheReadCalls = 0;
+  let cacheWriteCalls = 0;
   let legacyArchiveCalls = 0;
   const archivedSessions = [];
   const runtimeMessages = [];
@@ -74,6 +79,7 @@ function createHarness({
             return sessions;
           },
           async getHistoryData(sessionId) {
+            historyCalls++;
             if (historyLoader) return historyLoader(sessionId);
             const history = await historyGate;
             if (historyError) throw historyError;
@@ -81,6 +87,23 @@ function createHarness({
           },
           async fetchShareContent() {
             throw new Error('unused');
+          },
+        };
+      },
+    },
+    DeepSeekHistoryCache: {
+      createHistoryCache() {
+        return {
+          async get(session) {
+            cacheReadCalls++;
+            if (session?.id == null || session?.updated_at == null) return null;
+            return cacheRecords.get(cacheRecordKey(session)) || null;
+          },
+          async put(session, history) {
+            cacheWriteCalls++;
+            if (session?.id == null || session?.updated_at == null) return false;
+            cacheRecords.set(cacheRecordKey(session), history);
+            return true;
           },
         };
       },
@@ -116,6 +139,7 @@ function createHarness({
     DeepSeekDownloadClient: {
       async download() {
         downloadCalls++;
+        await downloadHandler?.();
         if (downloadError) throw downloadError;
         return { sizeBytes: 1 };
       },
@@ -138,6 +162,15 @@ function createHarness({
     get downloadCalls() {
       return downloadCalls;
     },
+    get historyCalls() {
+      return historyCalls;
+    },
+    get cacheReadCalls() {
+      return cacheReadCalls;
+    },
+    get cacheWriteCalls() {
+      return cacheWriteCalls;
+    },
     get legacyArchiveCalls() {
       return legacyArchiveCalls;
     },
@@ -145,6 +178,10 @@ function createHarness({
     releaseHistory,
     runtimeMessages,
   };
+}
+
+function cacheRecordKey(session) {
+  return JSON.stringify([String(session.id), String(session.updated_at)]);
 }
 
 function send(listener, message) {
@@ -216,6 +253,73 @@ test('个别会话失败时继续下载并在完成状态中报告数量', async
   assert.equal(harness.downloadCalls, 1);
 });
 
+test('全量导出复用更新时间相同的历史缓存', async () => {
+  const session = { id: 'session-cached', title: '缓存会话', updated_at: 42 };
+  const cachedHistory = {
+    chat_messages: [{ message_id: 1, role: 'USER' }],
+    messages: [{ message_id: 1, role: 'USER' }],
+  };
+  const cacheRecords = new Map([[cacheRecordKey(session), cachedHistory]]);
+  const harness = createHarness({
+    cacheRecords,
+    sessions: [session],
+    async historyLoader() {
+      assert.fail('缓存命中时不应请求历史接口');
+    },
+  });
+
+  const response = await send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
+  });
+  const status = readStatus(harness.listener);
+
+  assert.equal(response.ok, true);
+  assert.equal(harness.historyCalls, 0);
+  assert.equal(harness.cacheReadCalls, 1);
+  assert.equal(harness.cacheWriteCalls, 0);
+  assert.equal(status.exportState.cacheHitCount, 1);
+  assert.equal(status.exportState.networkCount, 0);
+  assert.deepEqual(harness.archivedSessions[0].messages, cachedHistory.messages);
+});
+
+test('下载阶段中断后再次导出从已缓存的历史接续', async () => {
+  const session = { id: 'session-resume', title: '接续会话', updated_at: 7 };
+  const cacheRecords = new Map();
+  let downloadAttempts = 0;
+  const harness = createHarness({
+    cacheRecords,
+    sessions: [session],
+    async downloadHandler() {
+      downloadAttempts++;
+      if (downloadAttempts === 1) throw new Error('模拟下载中断');
+    },
+    async historyLoader(sessionId) {
+      return { id: sessionId, messages: [] };
+    },
+  });
+
+  const first = await send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
+  });
+  const second = await send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
+  });
+  const status = readStatus(harness.listener);
+
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, true);
+  assert.equal(harness.historyCalls, 1);
+  assert.equal(harness.cacheWriteCalls, 1);
+  assert.equal(status.exportState.cacheHitCount, 1);
+  assert.equal(status.exportState.networkCount, 0);
+});
+
 test('popup 关闭期间发生的导出错误保留在查询状态中', async () => {
   const harness = createHarness({ downloadError: new Error('模拟下载失败') });
   const exporting = send(harness.listener, {
@@ -235,7 +339,7 @@ test('popup 关闭期间发生的导出错误保留在查询状态中', async ()
   assert.match(status.exportState.message, /模拟下载失败/);
 });
 
-test('全量导出以最多四个并发请求拉取历史并保持归档顺序', async () => {
+test('全量导出以最多两个并发请求拉取历史并保持归档顺序', async () => {
   const sessions = Array.from({ length: 8 }, (_, index) => ({
     id: `session-${index + 1}`,
     title: `会话 ${index + 1}`,
@@ -266,9 +370,9 @@ test('全量导出以最多四个并发请求拉取历史并保持归档顺序',
   });
 
   assert.equal(response.ok, true);
-  assert.equal(maxActiveRequests, 4);
+  assert.equal(maxActiveRequests, 2);
   assert.equal(scheduledWaits.length, sessions.length - 1);
-  assert.ok(scheduledWaits.every(milliseconds => milliseconds >= 300));
+  assert.ok(scheduledWaits.every(milliseconds => milliseconds >= 700));
   assert.deepEqual(
     harness.archivedSessions.map(session => session.id),
     sessions.map(session => session.id),
@@ -315,4 +419,41 @@ test('慢请求未结束时继续使用空闲并发槽拉取后续会话', async
     harness.archivedSessions.map(session => session.id),
     sessions.map(session => session.id),
   );
+});
+
+test('慢请求前的缓存预取保持在固定窗口内', async () => {
+  const sessions = Array.from({ length: 20 }, (_, index) => ({
+    id: `session-${index + 1}`,
+    title: `会话 ${index + 1}`,
+    updated_at: index + 1,
+  }));
+  const cacheRecords = new Map(
+    sessions.slice(1).map(session => [cacheRecordKey(session), { messages: [] }]),
+  );
+  let releaseFirstHistory;
+  const firstHistoryGate = new Promise(resolve => {
+    releaseFirstHistory = resolve;
+  });
+  const harness = createHarness({
+    cacheRecords,
+    sessions,
+    async historyLoader(sessionId) {
+      if (sessionId === 'session-1') await firstHistoryGate;
+      return { id: sessionId, messages: [] };
+    },
+  });
+
+  const exporting = send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(harness.cacheReadCalls, 16);
+  releaseFirstHistory();
+  const response = await exporting;
+
+  assert.equal(response.ok, true);
+  assert.equal(harness.cacheReadCalls, sessions.length);
 });
