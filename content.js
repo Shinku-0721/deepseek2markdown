@@ -4,10 +4,11 @@
 'use strict';
 
 const DeepSeekClientModule = globalThis.DeepSeekClient;
+const HistoryCacheModule = globalThis.DeepSeekHistoryCache;
 const ExportCore = globalThis.DeepSeekExportCore;
 const ExportDelivery = globalThis.DeepSeekExportDelivery;
 const DownloadClient = globalThis.DeepSeekDownloadClient;
-if (!DeepSeekClientModule || !ExportCore || !ExportDelivery || !DownloadClient) {
+if (!DeepSeekClientModule || !HistoryCacheModule || !ExportCore || !ExportDelivery || !DownloadClient) {
   throw new Error('DeepSeek 导出模块加载失败');
 }
 
@@ -18,8 +19,10 @@ const deepSeekClient = DeepSeekClientModule.createDeepSeekClient({
   // Token 可能在页面运行期间更新，客户端必须在每次请求前读取当前值。
   getBearerToken: () => bearerToken,
 });
-const HISTORY_REQUEST_CONCURRENCY = 4;
-const HISTORY_REQUEST_INTERVAL_MS = 375;
+const historyCache = HistoryCacheModule.createHistoryCache();
+const HISTORY_REQUEST_CONCURRENCY = 2;
+const HISTORY_REQUEST_INTERVAL_MS = 800;
+const HISTORY_PREFETCH_WINDOW = 16;
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 function getCurrentSessionId() {
@@ -67,6 +70,8 @@ function beginExport(action, format) {
     filename: null,
     sizeBytes: null,
     failedCount: 0,
+    cacheHitCount: 0,
+    networkCount: 0,
     startedAt: now,
     updatedAt: now,
   });
@@ -195,6 +200,8 @@ function exportAll(format, options, sendResponse) {
       `deepseek-all-${archiveTimestamp()}.zip`,
     );
     let failedCount = 0;
+    let cacheHitCount = 0;
+    let networkCount = 0;
     let nextHistoryRequestAt = Date.now();
 
     try {
@@ -204,58 +211,76 @@ function exportAll(format, options, sendResponse) {
         total: sessions.length,
         current: 0,
         failedCount,
+        cacheHitCount,
+        networkCount,
         message: '开始拉取消息...',
       });
 
       let completedCount = 0;
-      let nextSessionIndex = 0;
       let nextArchiveIndex = 0;
       const readySessions = new Map();
-      const workers = Array.from(
-        { length: Math.min(HISTORY_REQUEST_CONCURRENCY, sessions.length) },
-        async () => {
-          while (nextSessionIndex < sessions.length) {
-            const sessionIndex = nextSessionIndex++;
-            const session = sessions[sessionIndex];
-            const scheduledAt = Math.max(Date.now(), nextHistoryRequestAt);
-            nextHistoryRequestAt = scheduledAt + HISTORY_REQUEST_INTERVAL_MS;
-            const waitMilliseconds = scheduledAt - Date.now();
-            if (waitMilliseconds > 0) await sleep(waitMilliseconds);
+      for (let batchStart = 0; batchStart < sessions.length; batchStart += HISTORY_PREFETCH_WINDOW) {
+        const batchEnd = Math.min(batchStart + HISTORY_PREFETCH_WINDOW, sessions.length);
+        let nextSessionIndex = batchStart;
+        const workers = Array.from(
+          { length: Math.min(HISTORY_REQUEST_CONCURRENCY, batchEnd - batchStart) },
+          async () => {
+            while (nextSessionIndex < batchEnd) {
+              const sessionIndex = nextSessionIndex++;
+              const session = sessions[sessionIndex];
+              let exportedSession;
+              let cacheHit = false;
+              try {
+                let history = await historyCache.get(session);
+                if (history) {
+                  cacheHit = true;
+                  cacheHitCount++;
+                } else {
+                  const scheduledAt = Math.max(Date.now(), nextHistoryRequestAt);
+                  nextHistoryRequestAt = scheduledAt + HISTORY_REQUEST_INTERVAL_MS;
+                  const waitMilliseconds = scheduledAt - Date.now();
+                  if (waitMilliseconds > 0) await sleep(waitMilliseconds);
 
-            let exportedSession;
-            try {
-              const history = await deepSeekClient.getHistoryData(session.id);
-              // 列表和历史接口提供互补字段，合并后完整保留到 JSON 导出。
-              exportedSession = { ...session, ...history, messages: history.messages };
-            } catch (error) {
-              failedCount++;
-              exportedSession = {
-                ...session,
-                export_error: errorMessage(error),
-                messages: [],
-              };
+                  networkCount++;
+                  history = await deepSeekClient.getHistoryData(session.id);
+                  await historyCache.put(session, history);
+                }
+                // 列表和历史接口提供互补字段，合并后完整保留到 JSON 导出。
+                exportedSession = { ...session, ...history, messages: history.messages };
+              } catch (error) {
+                failedCount++;
+                exportedSession = {
+                  ...session,
+                  export_error: errorMessage(error),
+                  messages: [],
+                };
+              }
+
+              completedCount++;
+              readySessions.set(sessionIndex, exportedSession);
+              while (readySessions.has(nextArchiveIndex)) {
+                archive.addSession(readySessions.get(nextArchiveIndex));
+                readySessions.delete(nextArchiveIndex);
+                nextArchiveIndex++;
+              }
+
+              if (!cacheHit || completedCount === sessions.length || completedCount % 25 === 0) {
+                notifyProgress({
+                  type: 'progress',
+                  stage: 'fetch',
+                  total: sessions.length,
+                  current: completedCount,
+                  failedCount,
+                  cacheHitCount,
+                  networkCount,
+                  message: `${completedCount}/${sessions.length} · 缓存 ${cacheHitCount} · 请求 ${networkCount}`,
+                });
+              }
             }
-
-            completedCount++;
-            readySessions.set(sessionIndex, exportedSession);
-            while (readySessions.has(nextArchiveIndex)) {
-              archive.addSession(readySessions.get(nextArchiveIndex));
-              readySessions.delete(nextArchiveIndex);
-              nextArchiveIndex++;
-            }
-
-            notifyProgress({
-              type: 'progress',
-              stage: 'fetch',
-              total: sessions.length,
-              current: completedCount,
-              failedCount,
-              message: `${completedCount}/${sessions.length} · ${(session.title || '').slice(0, 30)}`,
-            });
-          }
-        },
-      );
-      await Promise.all(workers);
+          },
+        );
+        await Promise.all(workers);
+      }
 
       notifyProgress({
         type: 'progress',
@@ -263,6 +288,8 @@ function exportAll(format, options, sendResponse) {
         current: sessions.length,
         total: sessions.length,
         failedCount,
+        cacheHitCount,
+        networkCount,
         message: '正在完成压缩包...',
       });
       const artifact = await archive.finish();
