@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek to Markdown</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="bg-blobs"></div>
+  <div class="bg-noise"></div>
+  <div class="bg-grid"></div>
+
+  <div class="container">
+    <header>
+      <div class="header-brand">
+        <div class="header-logo">
+          <img src="assets/logo.png" alt="Logo" width="128" height="128">
+        </div>
+        <h1><span class="grad-text">DeepSeek</span><span class="arrow">&rarr;</span>Markdown</h1>
+      </div>
+      <span id="statusDot" class="status-dot unknown" title="状态"></span>
+    </header>
+
+    <div id="statusMsg" class="status-msg">正在检测...</div>
+
+    <div class="export-options" role="group" aria-labelledby="exportOptionsTitle">
+      <span id="exportOptionsTitle" class="options-title">Markdown 内容</span>
+      <label class="toggle-control">
+        <input id="includeThinking" type="checkbox" checked>
+        <span class="toggle-track" aria-hidden="true"></span>
+        <span class="toggle-label">思考过程</span>
+      </label>
+      <label class="toggle-control">
+        <input id="includeSearch" type="checkbox" checked>
+        <span class="toggle-track" aria-hidden="true"></span>
+        <span class="toggle-label">网络搜索</span>
+      </label>
+      <div class="branch-mode">
+        <span class="branch-title">分支展示</span>
+        <div class="segmented-control" role="radiogroup" aria-label="分支展示范围">
+          <label class="segmented-option">
+            <input id="branchLatest" type="radio" name="branchMode" value="latest" checked>
+            <span>最后一项</span>
+          </label>
+          <label class="segmented-option">
+            <input id="branchAll" type="radio" name="branchMode" value="all">
+            <span>全部</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <section class="section section--current">
+      <div class="section-head">
+        <span class="section-title">当前对话</span>
+      </div>
+      <div class="section-hint" id="curSessionHint">未检测到对话</div>
+      <div class="btn-row">
+        <button id="btnCurMd" class="btn btn--primary" disabled>Markdown</button>
+        <button id="btnCurJson" class="btn btn--ghost" disabled>JSON</button>
+      </div>
+    </section>
+
+    <section class="section section--all">
+      <div class="section-head">
+        <span class="section-title">全部对话</span>
+      </div>
+      <div class="btn-row">
+        <button id="btnAllMd" class="btn btn--primary" disabled>Markdown</button>
+        <button id="btnAllJson" class="btn btn--ghost" disabled>JSON</button>
+      </div>
+    </section>
+
+    <section class="section section--share">
+      <div class="section-head">
+        <span class="section-title">分享链接</span>
+      </div>
+      <div class="input-row">
+        <input type="text" id="shareInput" placeholder="粘贴分享链接或 share ID" spellcheck="false">
+      </div>
+      <div class="btn-row">
+        <button id="btnShareMd" class="btn btn--primary" disabled>Markdown</button>
+        <button id="btnShareJson" class="btn btn--ghost" disabled>JSON</button>
+      </div>
+    </section>
+
+    <div id="progressArea" class="progress-area hidden">
+      <div class="progress-bar-wrap">
+        <div id="progressBar" class="progress-bar"></div>
+      </div>
+      <div id="progressText" class="progress-text"></div>
+    </div>
+
+    <div class="footer-line"></div>
+  </div>
+
+  <script src="../lib/vendor/fflate.js"></script>
+  <script src="../lib/markdown-export.js"></script>
+  <script src="../lib/export-core.js"></script>
+  <script src="../lib/export-delivery.js"></script>
+  <script src="../lib/download-client.js"></script>
+  <script src="../lib/deepseek-client.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
