@@ -110,6 +110,29 @@ test('瞬时 HTTP 错误按退避间隔重试后恢复', async () => {
   assert.deepEqual(history.messages, []);
 });
 
+test('成功响应体连续截断三次后继续退避重试', async () => {
+  const waits = [];
+  let requestCount = 0;
+  const client = createDeepSeekClient({
+    wait: async milliseconds => waits.push(milliseconds),
+    fetch: async () => {
+      requestCount++;
+      return jsonResponse({}, {
+        async json() {
+          if (requestCount <= 3) throw new SyntaxError('Unexpected end of JSON input');
+          return { data: { biz_data: { chat_messages: [] } } };
+        },
+      });
+    },
+  });
+
+  const history = await client.getHistoryData('session-truncated-response');
+
+  assert.equal(requestCount, 4);
+  assert.deepEqual(waits, [500, 1000, 2000]);
+  assert.deepEqual(history.messages, []);
+});
+
 test('鉴权失败不重试', async () => {
   let requestCount = 0;
   const client = createDeepSeekClient({
