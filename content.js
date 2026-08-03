@@ -1,5 +1,9 @@
 /**
- * DeepSeek 页面协调层：维护页面 Token、导出进度和三种导出工作流。
+ * DeepSeek 页面协调模块。
+ *
+ * 该内容脚本连接页面凭证捕获、DeepSeek API 客户端、增量缓存、文件渲染和浏览器下载，
+ * 并维护当前对话、全部对话、分享链接三种导出任务的统一状态。导出任务属于页面生命周期，
+ * Popup 关闭后仍可继续执行；页面刷新后则通过持久缓存接续已完成的会话。
  */
 'use strict';
 
@@ -12,28 +16,53 @@ if (!DeepSeekClientModule || !HistoryCacheModule || !ExportCore || !ExportDelive
   throw new Error('DeepSeek 导出模块加载失败');
 }
 
+// Bearer Token 只保存在当前内容脚本内存中，由页面 MAIN 世界的捕获脚本动态更新。
 let bearerToken = null;
+// 页面同时只允许一个导出任务，避免重复请求、重复归档和状态相互覆盖。
 let activeExport = false;
+// Popup 可随时查询该不可变快照，以恢复任务进度或展示最近一次结果。
 let exportState = Object.freeze({ status: 'idle' });
 const deepSeekClient = DeepSeekClientModule.createDeepSeekClient({
   // Token 可能在页面运行期间更新，客户端必须在每次请求前读取当前值。
   getBearerToken: () => bearerToken,
 });
 const historyCache = HistoryCacheModule.createHistoryCache();
+// 历史接口采用低并发和全局启动间隔，降低对 DeepSeek 服务端的持续压力。
 const HISTORY_REQUEST_CONCURRENCY = 2;
 const HISTORY_REQUEST_INTERVAL_MS = 800;
+// 每批最多允许 16 个会话乱序完成，防止慢请求前方积压大量未归档对象。
 const HISTORY_PREFETCH_WINDOW = 16;
+/** 等待指定毫秒数，用于历史请求的全局节奏控制。 */
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
+/**
+ * 从当前 DeepSeek 对话路由中提取会话 ID。
+ *
+ * @returns {string|null} 当前 URL 是对话页时返回会话 ID，否则返回 null。
+ */
 function getCurrentSessionId() {
   const match = window.location.pathname.match(/\/a\/chat\/s\/([0-9a-f-]{16,})/i);
   return match ? match[1] : null;
 }
 
+/**
+ * 将任意抛出值转换为适合展示和写入导出错误字段的文本。
+ *
+ * @param {*} error 捕获到的异常或其他抛出值。
+ * @returns {string} 稳定的错误描述。
+ */
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 更新页面内的导出状态快照，并尽力把同一事件通知给 Popup。
+ *
+ * Popup 不在线不属于任务错误，因此消息发送失败会被忽略；exportState 始终先更新，
+ * 确保 Popup 再次打开时能够读取完整状态。
+ *
+ * @param {object} payload 包含 type、stage、进度计数和展示文本的状态事件。
+ */
 function notifyProgress(payload) {
   const { type, ...details } = payload;
   const status = type === 'complete' ? 'complete' : type === 'error' ? 'error' : 'running';
@@ -53,6 +82,13 @@ function notifyProgress(payload) {
   }
 }
 
+/**
+ * 原子地占用导出任务槽并初始化统一状态字段。
+ *
+ * @param {string} action 导出动作名称，例如 exportAll。
+ * @param {'markdown'|'json'} format 目标导出格式。
+ * @returns {boolean} 成功开始返回 true；已有任务运行时返回 false。
+ */
 function beginExport(action, format) {
   if (activeExport) return false;
 
@@ -85,6 +121,12 @@ function beginExport(action, format) {
   return true;
 }
 
+/**
+ * 把凭证捕获脚本注入页面 MAIN 世界。
+ *
+ * 内容脚本处于隔离世界，无法直接覆盖页面使用的 fetch/XHR；注入完成后立即移除 script
+ * 元素，实际 Hook 仍由已执行的 injected.js 保留在页面环境中。
+ */
 (function injectTokenHook() {
   // 内容脚本处于隔离世界，必须注入 MAIN 世界才能观察页面请求头。
   const script = document.createElement('script');
@@ -94,6 +136,7 @@ function beginExport(action, format) {
   (document.head || document.documentElement).appendChild(script);
 })();
 
+// 只接受当前窗口、当前源且类型明确的凭证消息，避免其他消息污染内存中的 Token。
 window.addEventListener('message', (event) => {
   if (
     event.source !== window
@@ -106,13 +149,25 @@ window.addEventListener('message', (event) => {
   }
 });
 
+/**
+ * 生成适合归档文件名的本地时间戳。
+ *
+ * @returns {string} 形如 YYYYMMDD-HHmm 的时间戳。
+ */
 function archiveTimestamp() {
   const date = new Date();
+  /** 将日期数字补齐为两位文本。 */
   const pad = value => String(value).padStart(2, '0');
   return date.getFullYear() + pad(date.getMonth() + 1) + pad(date.getDate())
     + '-' + pad(date.getHours()) + pad(date.getMinutes());
 }
 
+/**
+ * 触发浏览器下载，并把最终文件信息写回完成状态。
+ *
+ * @param {{filename: string, content: *, mimeType: string}} artifact 可下载文件产物。
+ * @returns {Promise<void>} 浏览器已接受下载触发后完成。
+ */
 async function downloadArtifact(artifact) {
   notifyProgress({ type: 'progress', stage: 'download', message: '正在下载...' });
   const { sizeBytes } = await DownloadClient.download(artifact);
@@ -130,12 +185,29 @@ async function downloadArtifact(artifact) {
   });
 }
 
+/**
+ * 把单个会话渲染为目标格式并立即下载。
+ *
+ * @param {'markdown'|'json'} format 目标格式。
+ * @param {object} session 已合并列表元数据和历史消息的会话。
+ * @param {object} options Markdown 展示选项；JSON 导出会忽略这些选项。
+ * @returns {Promise<void>} 文件组织和下载触发完成后结束。
+ */
 async function downloadSingleSession(format, session, options) {
   notifyProgress({ type: 'progress', stage: 'format', message: '正在组织文件...' });
   const artifact = await ExportDelivery.createSingleArtifact(format, session, options);
   await downloadArtifact(artifact);
 }
 
+/**
+ * 执行一种导出工作流，并统一处理互斥、错误状态和消息响应。
+ *
+ * @param {Function} sendResponse Chrome 消息通道的响应函数。
+ * @param {string} action 当前导出动作名称。
+ * @param {'markdown'|'json'} format 目标格式。
+ * @param {Function} operation 实际导出步骤，失败时应抛出异常。
+ * @returns {Promise<void>} 工作流及响应发送完成后结束。
+ */
 async function runExport(sendResponse, action, format, operation) {
   if (!beginExport(action, format)) {
     sendResponse({ ok: false, error: '已有导出任务正在进行' });
@@ -161,6 +233,13 @@ async function runExport(sendResponse, action, format, operation) {
   }
 }
 
+/**
+ * 导出当前 URL 对应的单个私有会话。
+ *
+ * @param {'markdown'|'json'} format 目标格式。
+ * @param {object} options Markdown 展示选项。
+ * @param {Function} sendResponse Chrome 消息响应函数。
+ */
 function exportCurrent(format, options, sendResponse) {
   void runExport(sendResponse, 'exportCurrent', format, async () => {
     const sessionId = getCurrentSessionId();
@@ -179,6 +258,17 @@ function exportCurrent(format, options, sendResponse) {
   });
 }
 
+/**
+ * 导出账号下的全部会话，并在请求限速、增量缓存和流式 ZIP 之间协调数据流。
+ *
+ * 会话列表顺序决定归档顺序；历史请求可以并发和乱序完成，但 readySessions 只会从
+ * nextArchiveIndex 开始连续写入。失败会话保留列表元数据和 export_error，使归档仍可交付，
+ * 下次执行时则只需重新请求未成功缓存的会话。
+ *
+ * @param {'markdown'|'json'} format 目标格式。
+ * @param {object} options Markdown 展示选项。
+ * @param {Function} sendResponse Chrome 消息响应函数。
+ */
 function exportAll(format, options, sendResponse) {
   void runExport(sendResponse, 'exportAll', format, async () => {
     if (!bearerToken) throw new Error('未获取到登录凭证，请在 DeepSeek 页面点击任意对话');
@@ -199,9 +289,11 @@ function exportAll(format, options, sendResponse) {
       options,
       `deepseek-all-${archiveTimestamp()}.zip`,
     );
+    // 三个计数分别描述失败、缓存复用和实际历史接口请求，便于验收与进度恢复。
     let failedCount = 0;
     let cacheHitCount = 0;
     let networkCount = 0;
+    // 所有 worker 共享下一次允许启动请求的时间，实现跨并发槽的全局节流。
     let nextHistoryRequestAt = Date.now();
 
     try {
@@ -217,11 +309,13 @@ function exportAll(format, options, sendResponse) {
       });
 
       let completedCount = 0;
+      // 归档严格按列表索引前进；Map 暂存已经完成但前序会话尚未就绪的结果。
       let nextArchiveIndex = 0;
       const readySessions = new Map();
       for (let batchStart = 0; batchStart < sessions.length; batchStart += HISTORY_PREFETCH_WINDOW) {
         const batchEnd = Math.min(batchStart + HISTORY_PREFETCH_WINDOW, sessions.length);
         let nextSessionIndex = batchStart;
+        // 每个 worker 从当前批次的共享索引领取任务；JavaScript 同步自增保证索引不重复。
         const workers = Array.from(
           { length: Math.min(HISTORY_REQUEST_CONCURRENCY, batchEnd - batchStart) },
           async () => {
@@ -301,6 +395,14 @@ function exportAll(format, options, sendResponse) {
   });
 }
 
+/**
+ * 获取并导出公开分享链接对应的会话。
+ *
+ * @param {string} raw 完整分享 URL、相对路径或 share ID。
+ * @param {'markdown'|'json'} format 目标格式。
+ * @param {object} options Markdown 展示选项。
+ * @param {Function} sendResponse Chrome 消息响应函数。
+ */
 function exportShare(raw, format, options, sendResponse) {
   void runExport(sendResponse, 'exportShare', format, async () => {
     const shareId = ExportCore.parseShareId(raw);
@@ -313,6 +415,7 @@ function exportShare(raw, format, options, sendResponse) {
   });
 }
 
+// 内容脚本的唯一消息入口：同步状态查询立即响应，导出动作保持消息通道到异步任务结束。
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message?.action) {
     case 'getStatus':
