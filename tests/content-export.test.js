@@ -1,3 +1,9 @@
+/**
+ * 内容脚本全量导出测试。
+ *
+ * 通过 VM 中的最小浏览器环境验证任务互斥、状态恢复、缓存接续、受限并发、预取窗口和
+ * 归档顺序。各 test 回调的中文用例名即行为说明，公共测试辅助函数另行记录输入与输出。
+ */
 'use strict';
 
 const test = require('node:test');
@@ -5,6 +11,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+/**
+ * 创建隔离的内容脚本运行环境，并暴露请求、缓存、归档和下载观测值。
+ *
+ * @param {object} options 可替换的会话、缓存、网络、下载和计时器行为。
+ * @returns {object} 消息监听器、异步闸门及累计调用统计。
+ */
 function createHarness({
   cacheRecords = new Map(),
   downloadHandler = null,
@@ -20,6 +32,7 @@ function createHarness({
   let downloadCalls = 0;
   let historyCalls = 0;
   let cacheReadCalls = 0;
+  let cacheBatchReadCalls = 0;
   let cacheWriteCalls = 0;
   let legacyArchiveCalls = 0;
   const archivedSessions = [];
@@ -94,6 +107,17 @@ function createHarness({
     DeepSeekHistoryCache: {
       createHistoryCache() {
         return {
+          async getMany(batchSessions) {
+            cacheBatchReadCalls++;
+            const histories = new Map();
+            for (const session of batchSessions) {
+              cacheReadCalls++;
+              if (session?.id == null || session?.updated_at == null) continue;
+              const history = cacheRecords.get(cacheRecordKey(session));
+              if (history) histories.set(String(session.id), history);
+            }
+            return histories;
+          },
           async get(session) {
             cacheReadCalls++;
             if (session?.id == null || session?.updated_at == null) return null;
@@ -168,6 +192,9 @@ function createHarness({
     get cacheReadCalls() {
       return cacheReadCalls;
     },
+    get cacheBatchReadCalls() {
+      return cacheBatchReadCalls;
+    },
     get cacheWriteCalls() {
       return cacheWriteCalls;
     },
@@ -180,16 +207,35 @@ function createHarness({
   };
 }
 
+/**
+ * 生成与测试缓存修订语义一致的稳定键。
+ *
+ * @param {object} session 会话元数据。
+ * @returns {string} 由会话 ID 和更新时间组成的键。
+ */
 function cacheRecordKey(session) {
   return JSON.stringify([String(session.id), String(session.updated_at)]);
 }
 
+/**
+ * 将 Chrome 回调式消息调用转换为 Promise。
+ *
+ * @param {Function} listener 内容脚本消息监听器。
+ * @param {object} message 待发送消息。
+ * @returns {Promise<object>} 内容脚本异步响应。
+ */
 function send(listener, message) {
   return new Promise(resolve => {
     listener(message, {}, resolve);
   });
 }
 
+/**
+ * 同步读取内容脚本当前状态快照。
+ *
+ * @param {Function} listener 内容脚本消息监听器。
+ * @returns {object} getStatus 响应。
+ */
 function readStatus(listener) {
   let status = null;
   listener({ action: 'getStatus' }, {}, value => {
@@ -284,6 +330,33 @@ test('全量导出复用更新时间相同的历史缓存', async () => {
   assert.deepEqual(harness.archivedSessions[0].messages, cachedHistory.messages);
 });
 
+test('全量导出按固定预取窗口批量读取本地缓存', async () => {
+  const sessions = Array.from({ length: 40 }, (_, index) => ({
+    id: `session-${index + 1}`,
+    title: `缓存会话 ${index + 1}`,
+    updated_at: index + 1,
+  }));
+  const cacheRecords = new Map(
+    sessions.map(session => [cacheRecordKey(session), { messages: [] }]),
+  );
+  const harness = createHarness({ cacheRecords, sessions });
+
+  const response = await send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(harness.cacheBatchReadCalls, 3);
+  assert.equal(harness.cacheReadCalls, sessions.length);
+  assert.equal(harness.historyCalls, 0);
+  assert.deepEqual(
+    harness.archivedSessions.map(session => session.id),
+    sessions.map(session => session.id),
+  );
+});
+
 test('下载阶段中断后再次导出从已缓存的历史接续', async () => {
   const session = { id: 'session-resume', title: '接续会话', updated_at: 7 };
   const cacheRecords = new Map();
@@ -318,6 +391,55 @@ test('下载阶段中断后再次导出从已缓存的历史接续', async () =>
   assert.equal(harness.cacheWriteCalls, 1);
   assert.equal(status.exportState.cacheHitCount, 1);
   assert.equal(status.exportState.networkCount, 0);
+});
+
+test('大批量下载中断后再次导出仅从窗口缓存重建归档', async () => {
+  const sessions = Array.from({ length: 128 }, (_, index) => ({
+    id: `resume-${index + 1}`,
+    title: `接续会话 ${index + 1}`,
+    updated_at: index + 1,
+  }));
+  const cacheRecords = new Map();
+  let downloadAttempts = 0;
+  const harness = createHarness({
+    cacheRecords,
+    sessions,
+    contentSetTimeout(callback) {
+      queueMicrotask(callback);
+      return 1;
+    },
+    async downloadHandler() {
+      downloadAttempts++;
+      if (downloadAttempts === 1) throw new Error('模拟大批量下载中断');
+    },
+    async historyLoader(sessionId) {
+      return { id: sessionId, messages: [] };
+    },
+  });
+
+  const first = await send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
+  });
+  const second = await send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
+  });
+  const status = readStatus(harness.listener);
+
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, true);
+  assert.equal(harness.historyCalls, sessions.length);
+  assert.equal(harness.cacheWriteCalls, sessions.length);
+  assert.equal(harness.cacheBatchReadCalls, 16);
+  assert.equal(status.exportState.cacheHitCount, sessions.length);
+  assert.equal(status.exportState.networkCount, 0);
+  assert.deepEqual(
+    harness.archivedSessions.slice(-sessions.length).map(session => session.id),
+    sessions.map(session => session.id),
+  );
 });
 
 test('popup 关闭期间发生的导出错误保留在查询状态中', async () => {

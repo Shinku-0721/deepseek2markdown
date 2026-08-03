@@ -1,15 +1,36 @@
+/**
+ * 全量导出历史缓存测试。
+ *
+ * 验证修订号命中、批量读取、结构压缩和存储故障降级，避免性能优化改变缓存正确性。
+ */
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createHistoryCache } = require('../lib/history-cache.js');
 
+/**
+ * 创建兼容 chrome.storage.local 最小读写接口的内存存储。
+ *
+ * @param {object} initial 初始键值记录。
+ * @returns {object} 支持单键或键数组读取并记录调用次数的存储替身。
+ */
 function createStorage(initial = {}) {
   const values = { ...initial };
+  let getCalls = 0;
   return {
     values,
-    async get(key) {
-      return Object.hasOwn(values, key) ? { [key]: values[key] } : {};
+    get getCalls() {
+      return getCalls;
+    },
+    async get(keys) {
+      getCalls++;
+      const requestedKeys = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(
+        requestedKeys
+          .filter(key => Object.hasOwn(values, key))
+          .map(key => [key, values[key]]),
+      );
     },
     async set(items) {
       Object.assign(values, items);
@@ -26,6 +47,27 @@ test('历史缓存仅在会话更新时间相同时命中', async () => {
   assert.equal(await cache.put(session, history), true);
   assert.deepEqual(await cache.get(session), history);
   assert.equal(await cache.get({ ...session, updated_at: 124 }), null);
+});
+
+test('批量读取使用一次存储调用并过滤修订号不匹配的记录', async () => {
+  const storage = createStorage();
+  const cache = createHistoryCache({ storage });
+  const currentSession = { id: 'session-current', updated_at: 10 };
+  const changedSession = { id: 'session-changed', updated_at: 20 };
+  await cache.put(currentSession, { messages: [{ message_id: 1 }] });
+  await cache.put(changedSession, { messages: [{ message_id: 2 }] });
+  storage.values['deepseekHistoryCache:v1:session-changed'].revision = '19';
+
+  const histories = await cache.getMany([
+    currentSession,
+    changedSession,
+    { id: 'session-without-revision' },
+  ]);
+
+  assert.equal(storage.getCalls, 1);
+  assert.deepEqual(histories.get(currentSession.id), { messages: [{ message_id: 1 }] });
+  assert.equal(histories.has(changedSession.id), false);
+  assert.equal(histories.has('session-without-revision'), false);
 });
 
 test('历史缓存不保存缺少更新时间的会话', async () => {

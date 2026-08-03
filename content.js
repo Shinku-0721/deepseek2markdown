@@ -314,6 +314,8 @@ function exportAll(format, options, sendResponse) {
       const readySessions = new Map();
       for (let batchStart = 0; batchStart < sessions.length; batchStart += HISTORY_PREFETCH_WINDOW) {
         const batchEnd = Math.min(batchStart + HISTORY_PREFETCH_WINDOW, sessions.length);
+        // 每个窗口只访问一次本地存储；窗口上限同时约束缓存历史在内存中的驻留数量。
+        const cachedHistories = await historyCache.getMany(sessions.slice(batchStart, batchEnd));
         let nextSessionIndex = batchStart;
         // 每个 worker 从当前批次的共享索引领取任务；JavaScript 同步自增保证索引不重复。
         const workers = Array.from(
@@ -325,7 +327,7 @@ function exportAll(format, options, sendResponse) {
               let exportedSession;
               let cacheHit = false;
               try {
-                let history = await historyCache.get(session);
+                let history = cachedHistories.get(String(session.id));
                 if (history) {
                   cacheHit = true;
                   cacheHitCount++;

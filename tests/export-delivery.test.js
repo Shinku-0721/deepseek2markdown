@@ -1,3 +1,8 @@
+/**
+ * 导出交付与 ZIP 结构测试。
+ *
+ * 使用真实 fflate 压缩和解压产物，验证单会话文件选择、搜索附件、重名目录及流式归档。
+ */
 'use strict';
 
 const test = require('node:test');
@@ -9,6 +14,12 @@ const {
   createSingleArtifact,
 } = require('../lib/export-delivery.js');
 
+/**
+ * 创建同时包含普通消息和搜索 fragment 的标准测试会话。
+ *
+ * @param {string} title 会话标题和默认 ID。
+ * @returns {object} 可交给导出核心处理的会话。
+ */
 function createSession(title = '压缩测试') {
   return {
     id: title,
@@ -36,6 +47,12 @@ function createSession(title = '压缩测试') {
   };
 }
 
+/**
+ * 解压 ZIP 产物并把每个条目解码为 UTF-8 文本。
+ *
+ * @param {object} artifact 导出交付模块生成的 ZIP 产物。
+ * @returns {Promise<object>} 归档路径到文本内容的映射。
+ */
 async function unzipText(artifact) {
   const content = artifact.content instanceof Blob
     ? new Uint8Array(await artifact.content.arrayBuffer())
@@ -111,4 +128,21 @@ test('流式归档允许逐会话写入并以 Blob 保存压缩分块', async ()
     '第一条/第一条.json',
     '第二条/第二条.json',
   ]);
+});
+
+test('大批量流式归档解压后保持会话数量、顺序和内容', async () => {
+  const sessions = Array.from({ length: 256 }, (_, index) => {
+    const session = createSession(`压力会话 ${String(index + 1).padStart(3, '0')}`);
+    session.id = `stress-${index + 1}`;
+    return session;
+  });
+  const builder = createArchiveBuilder('json', {}, 'stress.zip');
+  for (const session of sessions) builder.addSession(session);
+
+  const artifact = await builder.finish();
+  const files = await unzipText(artifact);
+  const archivedIds = Object.values(files).map(content => JSON.parse(content).id);
+
+  assert.equal(Object.keys(files).length, sessions.length);
+  assert.deepEqual(archivedIds, sessions.map(session => session.id));
 });
