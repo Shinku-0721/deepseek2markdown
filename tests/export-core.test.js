@@ -1,3 +1,8 @@
+/**
+ * 会话导出核心与 Markdown 渲染测试。
+ *
+ * 使用包含思考、搜索、网页打开、引用和分支的完整夹具验证文件结构与展示选项。
+ */
 'use strict';
 
 const test = require('node:test');
@@ -8,6 +13,12 @@ const {
   parseShareId,
 } = require('../lib/export-core.js');
 
+/**
+ * 创建覆盖主要 DeepSeek fragment 类型的会话夹具。
+ *
+ * @param {object} overrides 会话顶层字段覆盖值。
+ * @returns {object} 保留未知字段的标准测试会话。
+ */
 function createSession(overrides = {}) {
   return {
     id: 'session-123',
@@ -85,6 +96,13 @@ function createSession(overrides = {}) {
   };
 }
 
+/**
+ * 从导出文件集合中查找指定相对路径。
+ *
+ * @param {object} bundle 会话导出文件集合。
+ * @param {string} path 目标相对路径。
+ * @returns {object|undefined} 匹配的文件描述。
+ */
 function fileByPath(bundle, path) {
   return bundle.files.find(file => file.path === path);
 }

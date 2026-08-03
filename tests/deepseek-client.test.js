@@ -1,9 +1,21 @@
+/**
+ * DeepSeek API 客户端测试。
+ *
+ * 验证动态 Token、复合分页游标、响应结构保留、退避重试和正文读取超时。
+ */
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createDeepSeekClient } = require('../lib/deepseek-client.js');
 
+/**
+ * 创建具备 Fetch Response 最小接口的 JSON 响应替身。
+ *
+ * @param {*} payload json() 和默认 text() 返回的数据。
+ * @param {object} overrides 可覆盖的状态、方法或响应字段。
+ * @returns {object} 可交给客户端 fetch 依赖的响应对象。
+ */
 function jsonResponse(payload, overrides = {}) {
   return {
     ok: true,

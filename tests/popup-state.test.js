@@ -1,3 +1,8 @@
+/**
+ * Popup 状态恢复测试。
+ *
+ * 在 VM 中构造最小 DOM 和 Chrome API，验证 Popup 重开后恢复全量导出进度并禁用按钮。
+ */
 'use strict';
 
 const test = require('node:test');
@@ -5,24 +10,40 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+/** 模拟测试所需的 DOMTokenList 子集。 */
 class FakeClassList {
+  /**
+   * @param {...string} values 初始类名。
+   */
   constructor(...values) {
     this.values = new Set(values);
   }
 
+  /** @param {...string} values 待添加类名。 */
   add(...values) {
     for (const value of values) this.values.add(value);
   }
 
+  /** @param {...string} values 待移除类名。 */
   remove(...values) {
     for (const value of values) this.values.delete(value);
   }
 
+  /**
+   * @param {string} value 待查询类名。
+   * @returns {boolean} 类名存在时返回 true。
+   */
   contains(value) {
     return this.values.has(value);
   }
 }
 
+/**
+ * 创建 Popup 控件使用的最小 DOM 元素替身。
+ *
+ * @param {string} id 元素 ID。
+ * @returns {object} 包含状态字段和事件注册接口的元素。
+ */
 function createElement(id) {
   return {
     id,
@@ -42,6 +63,7 @@ function createElement(id) {
 
 test('popup 初始化时恢复正在进行的导出状态并禁用重复操作', async () => {
   const elements = new Map();
+  /** 按 ID 惰性创建并复用测试元素。 */
   const byId = id => {
     if (!elements.has(id)) elements.set(id, createElement(id));
     return elements.get(id);

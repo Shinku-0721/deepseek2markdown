@@ -1,9 +1,20 @@
+/**
+ * 浏览器下载客户端测试。
+ *
+ * 验证 Blob URL、隐藏下载链接、延迟释放以及同步点击失败时的立即清理。
+ */
 'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createDownloadClient } = require('../lib/download-client.js');
 
+/**
+ * 创建可观测 DOM、URL 和计时器副作用的下载环境。
+ *
+ * @param {object} options 可选点击异常。
+ * @returns {object} 下载客户端、链接替身及清理状态读取器。
+ */
 function createHarness({ clickError = null } = {}) {
   let appended = null;
   let cleanup = null;
