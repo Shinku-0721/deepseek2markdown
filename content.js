@@ -1,18 +1,26 @@
 /**
  * DeepSeek 页面协调模块。
  *
- * 该内容脚本连接页面凭证捕获、DeepSeek API 客户端、增量缓存、文件渲染和浏览器下载，
- * 并维护当前对话、全部对话、分享链接三种导出任务的统一状态。导出任务属于页面生命周期，
- * Popup 关闭后仍可继续执行；页面刷新后则通过持久缓存接续已完成的会话。
+ * 该内容脚本连接页面凭证捕获、导出 module 与浏览器下载，并维护当前对话、全部对话、
+ * 分享链接三种任务的统一状态。全量导出的列表、缓存、调度和归档由 deep module 负责；
+ * 任务状态属于页面生命周期，Popup 关闭后仍可继续执行。
  */
 'use strict';
 
 const DeepSeekClientModule = globalThis.DeepSeekClient;
 const HistoryCacheModule = globalThis.DeepSeekHistoryCache;
+const AllExportModule = globalThis.DeepSeekAllExport;
 const ExportCore = globalThis.DeepSeekExportCore;
 const ExportDelivery = globalThis.DeepSeekExportDelivery;
 const DownloadClient = globalThis.DeepSeekDownloadClient;
-if (!DeepSeekClientModule || !HistoryCacheModule || !ExportCore || !ExportDelivery || !DownloadClient) {
+if (
+  !DeepSeekClientModule
+  || !HistoryCacheModule
+  || !AllExportModule
+  || !ExportCore
+  || !ExportDelivery
+  || !DownloadClient
+) {
   throw new Error('DeepSeek 导出模块加载失败');
 }
 
@@ -27,13 +35,11 @@ const deepSeekClient = DeepSeekClientModule.createDeepSeekClient({
   getBearerToken: () => bearerToken,
 });
 const historyCache = HistoryCacheModule.createHistoryCache();
-// 历史接口采用低并发和全局启动间隔，降低对 DeepSeek 服务端的持续压力。
-const HISTORY_REQUEST_CONCURRENCY = 2;
-const HISTORY_REQUEST_INTERVAL_MS = 800;
-// 每批最多允许 16 个会话乱序完成，防止慢请求前方积压大量未归档对象。
-const HISTORY_PREFETCH_WINDOW = 16;
-/** 等待指定毫秒数，用于历史请求的全局节奏控制。 */
-const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+const allExport = AllExportModule.createAllExport({
+  deepSeekClient,
+  historyCache,
+  createArchiveBuilder: ExportDelivery.createArchiveBuilder,
+});
 
 /**
  * 从当前 DeepSeek 对话路由中提取会话 ID。
@@ -150,19 +156,6 @@ window.addEventListener('message', (event) => {
 });
 
 /**
- * 生成适合归档文件名的本地时间戳。
- *
- * @returns {string} 形如 YYYYMMDD-HHmm 的时间戳。
- */
-function archiveTimestamp() {
-  const date = new Date();
-  /** 将日期数字补齐为两位文本。 */
-  const pad = value => String(value).padStart(2, '0');
-  return date.getFullYear() + pad(date.getMonth() + 1) + pad(date.getDate())
-    + '-' + pad(date.getHours()) + pad(date.getMinutes());
-}
-
-/**
  * 触发浏览器下载，并把最终文件信息写回完成状态。
  *
  * @param {{filename: string, content: *, mimeType: string}} artifact 可下载文件产物。
@@ -194,9 +187,29 @@ async function downloadArtifact(artifact) {
  * @returns {Promise<void>} 文件组织和下载触发完成后结束。
  */
 async function downloadSingleSession(format, session, options) {
+  let exportOptions = options;
+  if (format === 'markdown') {
+    notifyProgress({ type: 'progress', stage: 'files', message: '正在获取上传文件...' });
+    exportOptions = await prepareSessionOptions(format, session, options);
+  }
+
   notifyProgress({ type: 'progress', stage: 'format', message: '正在组织文件...' });
-  const artifact = await ExportDelivery.createSingleArtifact(format, session, options);
+  const artifact = await ExportDelivery.createSingleArtifact(format, session, exportOptions);
   await downloadArtifact(artifact);
+}
+
+/**
+ * 为 Markdown 会话获取上传文件；JSON 始终保持原始数据导出，不额外发起文件请求。
+ *
+ * @param {'markdown'|'json'} format 目标格式。
+ * @param {object} session 当前会话。
+ * @param {object} options 原始导出选项。
+ * @returns {Promise<object>} 可传给渲染和交付模块的选项。
+ */
+async function prepareSessionOptions(format, session, options) {
+  if (format !== 'markdown') return options || {};
+  const attachments = await deepSeekClient.fetchUploadedFiles(session);
+  return { ...(options || {}), attachments };
 }
 
 /**
@@ -259,11 +272,7 @@ function exportCurrent(format, options, sendResponse) {
 }
 
 /**
- * 导出账号下的全部会话，并在请求限速、增量缓存和流式 ZIP 之间协调数据流。
- *
- * 会话列表顺序决定归档顺序；历史请求可以并发和乱序完成，但 readySessions 只会从
- * nextArchiveIndex 开始连续写入。失败会话保留列表元数据和 export_error，使归档仍可交付，
- * 下次执行时则只需重新请求未成功缓存的会话。
+ * 通过全量导出 module 生成产物，并由浏览器 adapter 触发下载。
  *
  * @param {'markdown'|'json'} format 目标格式。
  * @param {object} options Markdown 展示选项。
@@ -273,127 +282,8 @@ function exportAll(format, options, sendResponse) {
   void runExport(sendResponse, 'exportAll', format, async () => {
     if (!bearerToken) throw new Error('未获取到登录凭证，请在 DeepSeek 页面点击任意对话');
 
-    notifyProgress({ type: 'progress', stage: 'list', message: '拉取会话列表...' });
-    const sessions = await deepSeekClient.listAllSessions(({ page, total }) => {
-      notifyProgress({
-        type: 'progress',
-        stage: 'list',
-        message: `第 ${page} 页 · 已拉取 ${total} 个会话`,
-      });
-    });
-
-    if (!sessions.length) throw new Error('没有找到任何会话');
-
-    const archive = ExportDelivery.createArchiveBuilder(
-      format,
-      options,
-      `deepseek-all-${archiveTimestamp()}.zip`,
-    );
-    // 三个计数分别描述失败、缓存复用和实际历史接口请求，便于验收与进度恢复。
-    let failedCount = 0;
-    let cacheHitCount = 0;
-    let networkCount = 0;
-    // 所有 worker 共享下一次允许启动请求的时间，实现跨并发槽的全局节流。
-    let nextHistoryRequestAt = Date.now();
-
-    try {
-      notifyProgress({
-        type: 'progress',
-        stage: 'fetch',
-        total: sessions.length,
-        current: 0,
-        failedCount,
-        cacheHitCount,
-        networkCount,
-        message: '开始拉取消息...',
-      });
-
-      let completedCount = 0;
-      // 归档严格按列表索引前进；Map 暂存已经完成但前序会话尚未就绪的结果。
-      let nextArchiveIndex = 0;
-      const readySessions = new Map();
-      for (let batchStart = 0; batchStart < sessions.length; batchStart += HISTORY_PREFETCH_WINDOW) {
-        const batchEnd = Math.min(batchStart + HISTORY_PREFETCH_WINDOW, sessions.length);
-        // 每个窗口只访问一次本地存储；窗口上限同时约束缓存历史在内存中的驻留数量。
-        const cachedHistories = await historyCache.getMany(sessions.slice(batchStart, batchEnd));
-        let nextSessionIndex = batchStart;
-        // 每个 worker 从当前批次的共享索引领取任务；JavaScript 同步自增保证索引不重复。
-        const workers = Array.from(
-          { length: Math.min(HISTORY_REQUEST_CONCURRENCY, batchEnd - batchStart) },
-          async () => {
-            while (nextSessionIndex < batchEnd) {
-              const sessionIndex = nextSessionIndex++;
-              const session = sessions[sessionIndex];
-              let exportedSession;
-              let cacheHit = false;
-              try {
-                let history = cachedHistories.get(String(session.id));
-                if (history) {
-                  cacheHit = true;
-                  cacheHitCount++;
-                } else {
-                  const scheduledAt = Math.max(Date.now(), nextHistoryRequestAt);
-                  nextHistoryRequestAt = scheduledAt + HISTORY_REQUEST_INTERVAL_MS;
-                  const waitMilliseconds = scheduledAt - Date.now();
-                  if (waitMilliseconds > 0) await sleep(waitMilliseconds);
-
-                  networkCount++;
-                  history = await deepSeekClient.getHistoryData(session.id);
-                  await historyCache.put(session, history);
-                }
-                // 列表和历史接口提供互补字段，合并后完整保留到 JSON 导出。
-                exportedSession = { ...session, ...history, messages: history.messages };
-              } catch (error) {
-                failedCount++;
-                exportedSession = {
-                  ...session,
-                  export_error: errorMessage(error),
-                  messages: [],
-                };
-              }
-
-              completedCount++;
-              readySessions.set(sessionIndex, exportedSession);
-              while (readySessions.has(nextArchiveIndex)) {
-                archive.addSession(readySessions.get(nextArchiveIndex));
-                readySessions.delete(nextArchiveIndex);
-                nextArchiveIndex++;
-              }
-
-              if (!cacheHit || completedCount === sessions.length || completedCount % 25 === 0) {
-                notifyProgress({
-                  type: 'progress',
-                  stage: 'fetch',
-                  total: sessions.length,
-                  current: completedCount,
-                  failedCount,
-                  cacheHitCount,
-                  networkCount,
-                  message: `${completedCount}/${sessions.length} · 缓存 ${cacheHitCount} · 请求 ${networkCount}`,
-                });
-              }
-            }
-          },
-        );
-        await Promise.all(workers);
-      }
-
-      notifyProgress({
-        type: 'progress',
-        stage: 'archive',
-        current: sessions.length,
-        total: sessions.length,
-        failedCount,
-        cacheHitCount,
-        networkCount,
-        message: '正在完成压缩包...',
-      });
-      const artifact = await archive.finish();
-      await downloadArtifact(artifact);
-    } catch (error) {
-      archive.abort();
-      throw error;
-    }
+    const { artifact } = await allExport.run(format, options, notifyProgress);
+    await downloadArtifact(artifact);
   });
 }
 

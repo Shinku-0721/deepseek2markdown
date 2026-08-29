@@ -4,7 +4,10 @@
   "version": "1.2.0",
   "description": "导出 DeepSeek 聊天记录或分享链接为 Markdown / JSON",
   "permissions": ["activeTab", "storage", "unlimitedStorage"],
-  "host_permissions": ["https://chat.deepseek.com/*"],
+  "host_permissions": [
+    "https://chat.deepseek.com/*",
+    "https://files.deepseeksvc.com/*"
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -25,6 +28,7 @@
         "lib/download-client.js",
         "lib/deepseek-client.js",
         "lib/history-cache.js",
+        "lib/all-export.js",
         "content.js"
       ],
       "run_at": "document_start"

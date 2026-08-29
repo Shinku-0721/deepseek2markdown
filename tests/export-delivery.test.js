@@ -87,6 +87,28 @@ test('单会话 Markdown 未导出网络搜索时直接返回 Markdown 文件', 
   assert.doesNotMatch(artifact.content, /\[reference:|Search\//);
 });
 
+test('单会话 Markdown 包含上传文件时按 Files 相对路径打包', async () => {
+  const attachment = new Uint8Array([37, 80, 68, 70]);
+  const artifact = await createSingleArtifact('markdown', createSession(), {
+    includeSearch: false,
+    attachments: [{
+      fileName: 'report.pdf',
+      content: attachment,
+      mimeType: 'application/pdf',
+    }],
+  });
+  const content = new Uint8Array(await artifact.content.arrayBuffer());
+  const files = fflate.unzipSync(content);
+
+  assert.equal(artifact.filename, '压缩测试.zip');
+  assert.deepEqual(Object.keys(files).sort(), [
+    '压缩测试/Files/report.pdf',
+    '压缩测试/压缩测试.md',
+  ]);
+  assert.deepEqual(Array.from(files['压缩测试/Files/report.pdf']), Array.from(attachment));
+  assert.match(fflate.strFromU8(files['压缩测试/压缩测试.md']), /Files\/report\.pdf/);
+});
+
 test('单会话 JSON 直接返回完整 JSON 文件', async () => {
   const session = createSession();
   const artifact = await createSingleArtifact('json', session);

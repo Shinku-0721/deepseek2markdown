@@ -239,6 +239,45 @@ test('关闭思考后只隐藏 THINK，网络搜索和回答仍保留', () => {
   assert.match(main.content, /Vite 是构建工具/);
 });
 
+test('Markdown 将上传文件写入 Files 目录并在正文中引用', () => {
+  const firstContent = new Uint8Array([1, 2, 3]);
+  const secondContent = new Uint8Array([4, 5]);
+  const imageContent = new Uint8Array([82, 73, 70, 70]);
+  const bundle = createSessionExport('markdown', createSession(), {
+    includeSearch: false,
+    attachments: [
+      { fileName: '实验报告.pdf', content: firstContent, mimeType: 'application/pdf' },
+      { fileName: '实验报告.pdf', content: secondContent, mimeType: 'application/pdf' },
+      {
+        fileName: '页面截图.webp',
+        originalFileName: '页面截图.png',
+        content: imageContent,
+        mimeType: 'image/webp',
+      },
+      { fileName: '过期附件.docx', error: 'HTTP 404 Not Found' },
+    ],
+  });
+  const main = fileByPath(bundle, 'Vite 与 Vue 的关系.md').content;
+  const encodePath = value => encodeURIComponent(value).replace(/[!'()*]/g, character => (
+    '%' + character.charCodeAt(0).toString(16).toUpperCase()
+  ));
+  const firstPath = 'Files/' + encodePath('实验报告.pdf');
+  const secondPath = 'Files/' + encodePath('实验报告 (2).pdf');
+
+  assert.deepEqual(bundle.files.map(file => file.path), [
+    'Vite 与 Vue 的关系.md',
+    'Files/实验报告.pdf',
+    'Files/实验报告 (2).pdf',
+    'Files/页面截图.webp',
+  ]);
+  assert.match(main, /## 上传文件/);
+  assert.ok(main.includes(`[实验报告.pdf](${firstPath})`));
+  assert.ok(main.includes(`[实验报告 (2).pdf](${secondPath})`));
+  assert.ok(main.includes(`[页面截图.png](Files/${encodePath('页面截图.webp')})`));
+  assert.match(main, /过期附件\.docx（获取失败：HTTP 404 Not Found）/);
+  assert.equal(fileByPath(bundle, 'Files/实验报告.pdf').content, firstContent);
+});
+
 test('多轮会话使用 message_id 与 fragment id 组成搜索 ID，避免文件覆盖', () => {
   const first = createSession();
   const secondUser = {

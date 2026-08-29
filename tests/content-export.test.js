@@ -1,8 +1,8 @@
 /**
- * 内容脚本全量导出测试。
+ * 内容脚本浏览器 adapter 集成测试。
  *
- * 通过 VM 中的最小浏览器环境验证任务互斥、状态恢复、缓存接续、受限并发、预取窗口和
- * 归档顺序。各 test 回调的中文用例名即行为说明，公共测试辅助函数另行记录输入与输出。
+ * VM 环境只验证 Chrome 消息、任务状态、module 进度转发和产物下载；全量导出的列表、
+ * 缓存、调度、顺序、附件与失败继续语义由 all-export module interface 测试覆盖。
  */
 'use strict';
 
@@ -12,34 +12,32 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 /**
- * 创建隔离的内容脚本运行环境，并暴露请求、缓存、归档和下载观测值。
+ * 创建隔离的内容脚本环境，并暴露浏览器 adapter 的调用记录。
  *
- * @param {object} options 可替换的会话、缓存、网络、下载和计时器行为。
+ * @param {object} options 可替换的 module、当前会话、附件和下载行为。
  * @returns {object} 消息监听器、异步闸门及累计调用统计。
  */
 function createHarness({
-  cacheRecords = new Map(),
-  downloadHandler = null,
+  blockAllExport = false,
+  allExportError = null,
   downloadError = null,
-  historyError = null,
-  historyLoader = null,
-  sessions = [{ id: 'session-1', title: '会话 1' }],
-  contentSetTimeout = setTimeout,
+  uploadedFiles = [],
+  withToken = true,
 } = {}) {
   let contentListener = null;
   let tokenListener = null;
-  let releaseHistory = null;
+  let releaseAllExport = () => {};
+  let allExportCalls = 0;
   let downloadCalls = 0;
-  let historyCalls = 0;
-  let cacheReadCalls = 0;
-  let cacheBatchReadCalls = 0;
-  let cacheWriteCalls = 0;
-  let legacyArchiveCalls = 0;
-  const archivedSessions = [];
+  let uploadedFileCalls = 0;
+  const allExportArguments = [];
+  const singleExportOptions = [];
   const runtimeMessages = [];
-  const historyGate = new Promise(resolve => {
-    releaseHistory = resolve;
-  });
+  const allExportGate = blockAllExport
+    ? new Promise(resolve => {
+        releaseAllExport = resolve;
+      })
+    : Promise.resolve();
   const windowObject = {
     location: {
       pathname: '/a/chat/s/12345678-1234-1234-1234-123456789abc',
@@ -50,13 +48,14 @@ function createHarness({
     },
   };
   const artifact = {
-    filename: 'all.zip',
+    filename: 'deepseek-all-fixed.zip',
     content: new Blob([new Uint8Array([1])], { type: 'application/zip' }),
     mimeType: 'application/zip',
   };
+  const summary = { cacheHitCount: 2, networkCount: 3, failedCount: 1 };
   const context = {
     console,
-    setTimeout: contentSetTimeout,
+    setTimeout,
     clearTimeout,
     URL,
     Blob,
@@ -87,16 +86,12 @@ function createHarness({
     DeepSeekClient: {
       createDeepSeekClient() {
         return {
-          async listAllSessions(onPage) {
-            onPage({ page: 1, total: sessions.length });
-            return sessions;
+          async getHistoryData(id) {
+            return { id, title: '当前会话', messages: [] };
           },
-          async getHistoryData(sessionId) {
-            historyCalls++;
-            if (historyLoader) return historyLoader(sessionId);
-            const history = await historyGate;
-            if (historyError) throw historyError;
-            return history;
+          async fetchUploadedFiles() {
+            uploadedFileCalls++;
+            return uploadedFiles;
           },
           async fetchShareContent() {
             throw new Error('unused');
@@ -106,28 +101,34 @@ function createHarness({
     },
     DeepSeekHistoryCache: {
       createHistoryCache() {
+        return { cache: true };
+      },
+    },
+    DeepSeekAllExport: {
+      createAllExport() {
         return {
-          async getMany(batchSessions) {
-            cacheBatchReadCalls++;
-            const histories = new Map();
-            for (const session of batchSessions) {
-              cacheReadCalls++;
-              if (session?.id == null || session?.updated_at == null) continue;
-              const history = cacheRecords.get(cacheRecordKey(session));
-              if (history) histories.set(String(session.id), history);
-            }
-            return histories;
-          },
-          async get(session) {
-            cacheReadCalls++;
-            if (session?.id == null || session?.updated_at == null) return null;
-            return cacheRecords.get(cacheRecordKey(session)) || null;
-          },
-          async put(session, history) {
-            cacheWriteCalls++;
-            if (session?.id == null || session?.updated_at == null) return false;
-            cacheRecords.set(cacheRecordKey(session), history);
-            return true;
+          async run(format, options, onProgress) {
+            allExportCalls++;
+            allExportArguments.push({ format, options });
+            onProgress({
+              type: 'progress',
+              stage: 'fetch',
+              current: 1,
+              total: 4,
+              ...summary,
+              message: '1/4 · 缓存 2 · 请求 3',
+            });
+            await allExportGate;
+            if (allExportError) throw allExportError;
+            onProgress({
+              type: 'progress',
+              stage: 'archive',
+              current: 4,
+              total: 4,
+              ...summary,
+              message: '正在完成压缩包...',
+            });
+            return { artifact, summary };
           },
         };
       },
@@ -142,30 +143,18 @@ function createHarness({
     },
     DeepSeekExportDelivery: {
       createArchiveBuilder() {
-        return {
-          addSession(session) {
-            archivedSessions.push(session);
-          },
-          async finish() {
-            return artifact;
-          },
-          abort() {},
-        };
+        throw new Error('content adapter 不应直接创建全量归档');
       },
-      async createArchiveArtifact() {
-        legacyArchiveCalls++;
+      async createSingleArtifact(_format, _session, options) {
+        singleExportOptions.push(options);
         return artifact;
-      },
-      async createSingleArtifact() {
-        throw new Error('unused');
       },
     },
     DeepSeekDownloadClient: {
       async download() {
         downloadCalls++;
-        await downloadHandler?.();
         if (downloadError) throw downloadError;
-        return { sizeBytes: 1 };
+        return { sizeBytes: 1024 };
       },
     },
   };
@@ -175,67 +164,41 @@ function createHarness({
     context,
     { filename: 'content.js' },
   );
-  tokenListener({
-    source: windowObject,
-    origin: windowObject.location.origin,
-    data: { type: 'DS2MD_TOKEN', token: 'Bearer test' },
-  });
+
+  if (withToken) {
+    tokenListener({
+      source: windowObject,
+      origin: windowObject.location.origin,
+      data: { type: 'DS2MD_TOKEN', token: 'Bearer test' },
+    });
+  }
 
   return {
-    archivedSessions,
+    allExportArguments,
+    singleExportOptions,
+    get allExportCalls() {
+      return allExportCalls;
+    },
     get downloadCalls() {
       return downloadCalls;
     },
-    get historyCalls() {
-      return historyCalls;
-    },
-    get cacheReadCalls() {
-      return cacheReadCalls;
-    },
-    get cacheBatchReadCalls() {
-      return cacheBatchReadCalls;
-    },
-    get cacheWriteCalls() {
-      return cacheWriteCalls;
-    },
-    get legacyArchiveCalls() {
-      return legacyArchiveCalls;
+    get uploadedFileCalls() {
+      return uploadedFileCalls;
     },
     listener: contentListener,
-    releaseHistory,
+    releaseAllExport,
     runtimeMessages,
   };
 }
 
-/**
- * 生成与测试缓存修订语义一致的稳定键。
- *
- * @param {object} session 会话元数据。
- * @returns {string} 由会话 ID 和更新时间组成的键。
- */
-function cacheRecordKey(session) {
-  return JSON.stringify([String(session.id), String(session.updated_at)]);
-}
-
-/**
- * 将 Chrome 回调式消息调用转换为 Promise。
- *
- * @param {Function} listener 内容脚本消息监听器。
- * @param {object} message 待发送消息。
- * @returns {Promise<object>} 内容脚本异步响应。
- */
+/** 将 Chrome 回调式消息调用转换为 Promise。 */
 function send(listener, message) {
   return new Promise(resolve => {
     listener(message, {}, resolve);
   });
 }
 
-/**
- * 同步读取内容脚本当前状态快照。
- *
- * @param {Function} listener 内容脚本消息监听器。
- * @returns {object} getStatus 响应。
- */
+/** 同步读取内容脚本当前状态快照。 */
 function readStatus(listener) {
   let status = null;
   listener({ action: 'getStatus' }, {}, value => {
@@ -244,246 +207,86 @@ function readStatus(listener) {
   return status;
 }
 
-test('全量导出状态可在 popup 重开后查询，并拒绝重复任务', async () => {
-  const harness = createHarness();
+async function nextTurn() {
+  await new Promise(resolve => setImmediate(resolve));
+}
+
+test('全量导出状态可恢复、拒绝重复任务并下载 module 产物', async () => {
+  const harness = createHarness({ blockAllExport: true });
   const firstExport = send(harness.listener, {
     action: 'exportAll',
-    format: 'json',
-    options: {},
+    format: 'markdown',
+    options: { includeSearch: false },
   });
-  await new Promise(resolve => setImmediate(resolve));
+  await nextTurn();
 
   const runningStatus = readStatus(harness.listener);
-  const duplicateExport = send(harness.listener, {
+  const duplicateResponse = await send(harness.listener, {
     action: 'exportAll',
     format: 'json',
     options: {},
   });
-  await new Promise(resolve => setImmediate(resolve));
-  harness.releaseHistory({ messages: [] });
-
-  const [firstResponse, duplicateResponse] = await Promise.all([firstExport, duplicateExport]);
+  harness.releaseAllExport();
+  const firstResponse = await firstExport;
   const completedStatus = readStatus(harness.listener);
 
   assert.equal(runningStatus.exportState.status, 'running');
   assert.equal(runningStatus.exportState.action, 'exportAll');
   assert.equal(runningStatus.exportState.stage, 'fetch');
+  assert.equal(runningStatus.exportState.current, 1);
   assert.equal(duplicateResponse.ok, false);
   assert.equal(duplicateResponse.error, '已有导出任务正在进行');
   assert.equal(firstResponse.ok, true);
   assert.equal(completedStatus.exportState.status, 'complete');
-  assert.equal(completedStatus.exportState.filename, 'all.zip');
-  assert.equal(harness.archivedSessions.length, 1);
-  assert.equal(harness.legacyArchiveCalls, 0);
+  assert.equal(completedStatus.exportState.filename, 'deepseek-all-fixed.zip');
+  assert.equal(completedStatus.exportState.failedCount, 1);
+  assert.equal(completedStatus.exportState.cacheHitCount, 2);
+  assert.equal(completedStatus.exportState.networkCount, 3);
+  assert.match(completedStatus.exportState.message, /1 个会话失败/);
+  assert.equal(harness.allExportCalls, 1);
   assert.equal(harness.downloadCalls, 1);
+  assert.deepEqual(harness.allExportArguments[0], {
+    format: 'markdown',
+    options: { includeSearch: false },
+  });
+  assert.ok(harness.runtimeMessages.some(message => message.stage === 'archive'));
 });
 
-test('个别会话失败时继续下载并在完成状态中报告数量', async () => {
-  const harness = createHarness({ historyError: new Error('模拟历史请求失败') });
-  const exporting = send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-  await new Promise(resolve => setImmediate(resolve));
-  harness.releaseHistory({ messages: [] });
-
-  const response = await exporting;
-  const status = readStatus(harness.listener);
-
-  assert.equal(response.ok, true);
-  assert.equal(status.exportState.status, 'complete');
-  assert.equal(status.exportState.failedCount, 1);
-  assert.match(status.exportState.message, /1 个会话失败/);
-  assert.match(harness.archivedSessions[0].export_error, /模拟历史请求失败/);
-  assert.equal(harness.downloadCalls, 1);
-});
-
-test('全量导出复用更新时间相同的历史缓存', async () => {
-  const session = { id: 'session-cached', title: '缓存会话', updated_at: 42 };
-  const cachedHistory = {
-    chat_messages: [{ message_id: 1, role: 'USER' }],
-    messages: [{ message_id: 1, role: 'USER' }],
-  };
-  const cacheRecords = new Map([[cacheRecordKey(session), cachedHistory]]);
-  const harness = createHarness({
-    cacheRecords,
-    sessions: [session],
-    async historyLoader() {
-      assert.fail('缓存命中时不应请求历史接口');
-    },
-  });
-
-  const response = await send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-  const status = readStatus(harness.listener);
-
-  assert.equal(response.ok, true);
-  assert.equal(harness.historyCalls, 0);
-  assert.equal(harness.cacheReadCalls, 1);
-  assert.equal(harness.cacheWriteCalls, 0);
-  assert.equal(status.exportState.cacheHitCount, 1);
-  assert.equal(status.exportState.networkCount, 0);
-  assert.deepEqual(harness.archivedSessions[0].messages, cachedHistory.messages);
-});
-
-test('全量导出按固定预取窗口批量读取本地缓存', async () => {
-  const sessions = Array.from({ length: 40 }, (_, index) => ({
-    id: `session-${index + 1}`,
-    title: `缓存会话 ${index + 1}`,
-    updated_at: index + 1,
-  }));
-  const cacheRecords = new Map(
-    sessions.map(session => [cacheRecordKey(session), { messages: [] }]),
-  );
-  const harness = createHarness({ cacheRecords, sessions });
-
-  const response = await send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-
-  assert.equal(response.ok, true);
-  assert.equal(harness.cacheBatchReadCalls, 3);
-  assert.equal(harness.cacheReadCalls, sessions.length);
-  assert.equal(harness.historyCalls, 0);
-  assert.deepEqual(
-    harness.archivedSessions.map(session => session.id),
-    sessions.map(session => session.id),
-  );
-});
-
-test('下载阶段中断后再次导出从已缓存的历史接续', async () => {
-  const session = { id: 'session-resume', title: '接续会话', updated_at: 7 };
-  const cacheRecords = new Map();
-  let downloadAttempts = 0;
-  const harness = createHarness({
-    cacheRecords,
-    sessions: [session],
-    async downloadHandler() {
-      downloadAttempts++;
-      if (downloadAttempts === 1) throw new Error('模拟下载中断');
-    },
-    async historyLoader(sessionId) {
-      return { id: sessionId, messages: [] };
-    },
-  });
-
-  const first = await send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-  const second = await send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-  const status = readStatus(harness.listener);
-
-  assert.equal(first.ok, false);
-  assert.equal(second.ok, true);
-  assert.equal(harness.historyCalls, 1);
-  assert.equal(harness.cacheWriteCalls, 1);
-  assert.equal(status.exportState.cacheHitCount, 1);
-  assert.equal(status.exportState.networkCount, 0);
-});
-
-test('大批量下载中断后再次导出仅从窗口缓存重建归档', async () => {
-  const sessions = Array.from({ length: 128 }, (_, index) => ({
-    id: `resume-${index + 1}`,
-    title: `接续会话 ${index + 1}`,
-    updated_at: index + 1,
-  }));
-  const cacheRecords = new Map();
-  let downloadAttempts = 0;
-  const harness = createHarness({
-    cacheRecords,
-    sessions,
-    contentSetTimeout(callback) {
-      queueMicrotask(callback);
-      return 1;
-    },
-    async downloadHandler() {
-      downloadAttempts++;
-      if (downloadAttempts === 1) throw new Error('模拟大批量下载中断');
-    },
-    async historyLoader(sessionId) {
-      return { id: sessionId, messages: [] };
-    },
-  });
-
-  const first = await send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-  const second = await send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-  const status = readStatus(harness.listener);
-
-  assert.equal(first.ok, false);
-  assert.equal(second.ok, true);
-  assert.equal(harness.historyCalls, sessions.length);
-  assert.equal(harness.cacheWriteCalls, sessions.length);
-  assert.equal(harness.cacheBatchReadCalls, 16);
-  assert.equal(status.exportState.cacheHitCount, sessions.length);
-  assert.equal(status.exportState.networkCount, 0);
-  assert.deepEqual(
-    harness.archivedSessions.slice(-sessions.length).map(session => session.id),
-    sessions.map(session => session.id),
-  );
-});
-
-test('popup 关闭期间发生的导出错误保留在查询状态中', async () => {
+test('下载失败后消息响应和状态快照保留原始错误', async () => {
   const harness = createHarness({ downloadError: new Error('模拟下载失败') });
-  const exporting = send(harness.listener, {
+
+  const response = await send(harness.listener, {
     action: 'exportAll',
     format: 'json',
     options: {},
   });
-  await new Promise(resolve => setImmediate(resolve));
-  harness.releaseHistory({ messages: [] });
-
-  const response = await exporting;
   const status = readStatus(harness.listener);
 
   assert.equal(response.ok, false);
   assert.match(response.error, /模拟下载失败/);
   assert.equal(status.exportState.status, 'error');
   assert.match(status.exportState.message, /模拟下载失败/);
+  assert.equal(harness.downloadCalls, 1);
 });
 
-test('全量导出以最多两个并发请求拉取历史并保持归档顺序', async () => {
-  const sessions = Array.from({ length: 8 }, (_, index) => ({
-    id: `session-${index + 1}`,
-    title: `会话 ${index + 1}`,
-  }));
-  let activeRequests = 0;
-  let maxActiveRequests = 0;
-  const scheduledWaits = [];
-  const harness = createHarness({
-    sessions,
-    contentSetTimeout(callback, milliseconds) {
-      scheduledWaits.push(milliseconds);
-      queueMicrotask(callback);
-      return 1;
-    },
-    async historyLoader(sessionId) {
-      activeRequests++;
-      maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
-      await new Promise(resolve => setTimeout(resolve, 10));
-      activeRequests--;
-      return { id: sessionId, messages: [] };
-    },
+test('module 失败时不触发下载并通过消息通道返回错误', async () => {
+  const harness = createHarness({ allExportError: new Error('模拟归档中止') });
+
+  const response = await send(harness.listener, {
+    action: 'exportAll',
+    format: 'json',
+    options: {},
   });
+  const status = readStatus(harness.listener);
+
+  assert.equal(response.ok, false);
+  assert.match(response.error, /模拟归档中止/);
+  assert.equal(status.exportState.status, 'error');
+  assert.equal(harness.downloadCalls, 0);
+});
+
+test('缺少页面凭证时在调用全量导出 module 前失败', async () => {
+  const harness = createHarness({ withToken: false });
 
   const response = await send(harness.listener, {
     action: 'exportAll',
@@ -491,91 +294,30 @@ test('全量导出以最多两个并发请求拉取历史并保持归档顺序',
     options: {},
   });
 
-  assert.equal(response.ok, true);
-  assert.equal(maxActiveRequests, 2);
-  assert.equal(scheduledWaits.length, sessions.length - 1);
-  assert.ok(scheduledWaits.every(milliseconds => milliseconds >= 700));
-  assert.deepEqual(
-    harness.archivedSessions.map(session => session.id),
-    sessions.map(session => session.id),
-  );
+  assert.equal(response.ok, false);
+  assert.match(response.error, /未获取到登录凭证/);
+  assert.equal(harness.allExportCalls, 0);
+  assert.equal(harness.downloadCalls, 0);
 });
 
-test('慢请求未结束时继续使用空闲并发槽拉取后续会话', async () => {
-  const sessions = Array.from({ length: 5 }, (_, index) => ({
-    id: `session-${index + 1}`,
-    title: `会话 ${index + 1}`,
-  }));
-  const startedSessions = [];
-  let releaseFirstHistory;
-  const firstHistoryGate = new Promise(resolve => {
-    releaseFirstHistory = resolve;
-  });
-  const harness = createHarness({
-    sessions,
-    contentSetTimeout(callback) {
-      queueMicrotask(callback);
-      return 1;
-    },
-    async historyLoader(sessionId) {
-      startedSessions.push(sessionId);
-      if (sessionId === 'session-1') await firstHistoryGate;
-      return { id: sessionId, messages: [] };
-    },
-  });
+test('当前 Markdown 导出仍先获取上传文件再交给单文件交付器', async () => {
+  const uploadedFiles = [{
+    fileName: '当前附件.pdf',
+    content: new Uint8Array([1]),
+    mimeType: 'application/pdf',
+  }];
+  const harness = createHarness({ uploadedFiles });
 
-  const exporting = send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
+  const response = await send(harness.listener, {
+    action: 'exportCurrent',
+    format: 'markdown',
+    options: { includeSearch: false },
   });
-  await new Promise(resolve => setImmediate(resolve));
-  const startedBeforeRelease = [...startedSessions];
-  releaseFirstHistory();
-
-  const response = await exporting;
 
   assert.equal(response.ok, true);
-  assert.deepEqual(startedBeforeRelease, sessions.map(session => session.id));
-  assert.deepEqual(
-    harness.archivedSessions.map(session => session.id),
-    sessions.map(session => session.id),
-  );
-});
-
-test('慢请求前的缓存预取保持在固定窗口内', async () => {
-  const sessions = Array.from({ length: 20 }, (_, index) => ({
-    id: `session-${index + 1}`,
-    title: `会话 ${index + 1}`,
-    updated_at: index + 1,
-  }));
-  const cacheRecords = new Map(
-    sessions.slice(1).map(session => [cacheRecordKey(session), { messages: [] }]),
-  );
-  let releaseFirstHistory;
-  const firstHistoryGate = new Promise(resolve => {
-    releaseFirstHistory = resolve;
-  });
-  const harness = createHarness({
-    cacheRecords,
-    sessions,
-    async historyLoader(sessionId) {
-      if (sessionId === 'session-1') await firstHistoryGate;
-      return { id: sessionId, messages: [] };
-    },
-  });
-
-  const exporting = send(harness.listener, {
-    action: 'exportAll',
-    format: 'json',
-    options: {},
-  });
-  await new Promise(resolve => setImmediate(resolve));
-
-  assert.equal(harness.cacheReadCalls, 16);
-  releaseFirstHistory();
-  const response = await exporting;
-
-  assert.equal(response.ok, true);
-  assert.equal(harness.cacheReadCalls, sessions.length);
+  assert.equal(harness.uploadedFileCalls, 1);
+  assert.equal(harness.singleExportOptions[0].includeSearch, false);
+  assert.deepEqual(harness.singleExportOptions[0].attachments, uploadedFiles);
+  assert.equal(harness.allExportCalls, 0);
+  assert.equal(harness.downloadCalls, 1);
 });

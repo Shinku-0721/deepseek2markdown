@@ -57,6 +57,118 @@ test('历史请求动态读取 Token，并保留原始 biz_data 字段', async (
   assert.deepEqual(first.messages, first.chat_messages);
 });
 
+test('历史上传文件使用签名参数请求真实文件服务并按 ID 去重', async () => {
+  const requests = [];
+  const bytes = new Uint8Array([37, 80, 68, 70]);
+  const attachment = {
+    id: 'file-80026c92-6b18-4ea7-a70a-61b6486f71c9',
+    status: 'SUCCESS',
+    fileName: '实验报告.pdf',
+    fileSize: bytes.length,
+    signedPath: '/file?file_id=80026c92-6b18-4ea7-a70a-61b6486f71c9&state=signed-state',
+  };
+  const client = createDeepSeekClient({
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: { get: name => name === 'content-type' ? 'application/pdf' : null },
+        arrayBuffer: async () => bytes.buffer,
+      };
+    },
+  });
+
+  const files = await client.fetchUploadedFiles({
+    messages: [{ fragments: [{ files: [
+      attachment,
+      { ...attachment },
+      {
+        file_id: 'snake-case-id',
+        status: 'SUCCESS',
+        file_name: '补充材料.pdf',
+        file_size: bytes.length,
+        signed_path: '/file?file_id=snake-case-id&state=snake-state',
+      },
+    ] }] }],
+  });
+  const requestUrl = new URL(requests[0].url);
+
+  assert.equal(files.length, 2);
+  assert.equal(files[0].fileName, '实验报告.pdf');
+  assert.equal(files[1].fileName, '补充材料.pdf');
+  assert.deepEqual(Array.from(files[0].content), Array.from(bytes));
+  assert.equal(requestUrl.origin, 'https://files.deepseeksvc.com');
+  assert.equal(requestUrl.pathname, '/api/file');
+  assert.equal(requestUrl.searchParams.get('file_id'), '80026c92-6b18-4ea7-a70a-61b6486f71c9');
+  assert.equal(requestUrl.searchParams.get('state'), 'signed-state');
+  assert.equal(requestUrl.searchParams.get('ty'), 'r');
+  assert.equal(requests[0].options.credentials, 'omit');
+  assert.equal(requests.length, 2);
+});
+
+test('历史图片附件使用图片预览模式并按响应格式保存', async () => {
+  const requests = [];
+  const bytes = new Uint8Array([82, 73, 70, 70]);
+  const client = createDeepSeekClient({
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: { get: name => name === 'content-type' ? 'image/webp' : null },
+        arrayBuffer: async () => bytes.buffer,
+      };
+    },
+  });
+
+  const files = await client.fetchUploadedFiles({
+    attachments: [{
+      file_id: 'image-id',
+      status: 'SUCCESS',
+      file_name: 'PixPin_2026-08-04_22-12-09.png',
+      file_size: bytes.length,
+      is_image: true,
+      signed_path: '/file?file_id=image-id&state=image-state',
+    }],
+  });
+  const requestUrl = new URL(requests[0].url);
+
+  assert.equal(requestUrl.searchParams.get('ty'), 'p');
+  assert.equal(files[0].fileName, 'PixPin_2026-08-04_22-12-09.webp');
+  assert.equal(files[0].originalFileName, 'PixPin_2026-08-04_22-12-09.png');
+  assert.equal(files[0].mimeType, 'image/webp');
+  assert.deepEqual(Array.from(files[0].content), Array.from(bytes));
+});
+
+test('单个历史附件不可下载时返回错误结果而不中断其他文件', async () => {
+  const client = createDeepSeekClient({
+    fetch: async () => jsonResponse({}, {
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+    }),
+  });
+
+  const files = await client.fetchUploadedFiles({
+    attachments: [
+      { id: 'file-missing-path', status: 'SUCCESS', fileName: '无地址.pdf' },
+      {
+        id: 'file-expired',
+        status: 'SUCCESS',
+        fileName: '已过期.pdf',
+        signedPath: '/file?file_id=expired&state=expired-state',
+      },
+    ],
+  });
+
+  assert.equal(files.length, 2);
+  assert.match(files[0].error, /缺少文件下载地址/);
+  assert.match(files[1].error, /HTTP 404 Not Found/);
+});
+
 test('会话分页使用 DeepSeek 复合游标并报告累计进度', async () => {
   const urls = [];
   const progress = [];
