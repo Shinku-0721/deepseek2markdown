@@ -195,10 +195,21 @@ test('缓存未命中写入成功历史，并在连续第二次执行时全部�
   const harness = createHarness({ sessions, historyCache: cache, archiveFactory });
 
   const first = await harness.allExport.run('json');
-  const second = await harness.allExport.run('json');
+  const secondProgress = [];
+  const second = await harness.allExport.run('json', {}, event => secondProgress.push(event));
 
   assert.deepEqual(first.summary, { cacheHitCount: 1, networkCount: 1, failedCount: 0 });
   assert.deepEqual(second.summary, { cacheHitCount: 2, networkCount: 0, failedCount: 0 });
+  assert.deepEqual(secondProgress.at(-1), {
+    type: 'progress',
+    stage: 'archive',
+    current: 2,
+    total: 2,
+    cacheHitCount: 2,
+    networkCount: 0,
+    failedCount: 0,
+    message: '正在完成压缩包...',
+  });
   assert.equal(harness.historyCalls, 1);
   assert.equal(cache.writes, 1);
   assert.deepEqual(
