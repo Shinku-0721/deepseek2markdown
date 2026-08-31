@@ -62,7 +62,10 @@ jobs:
             lib \
             popup
 
-          sha256sum "$ASSET" > "${ASSET}.sha256"
+          (
+            cd dist
+            sha256sum "$(basename "$ASSET")" > "$(basename "${ASSET}.sha256")"
+          )
           echo "ASSET=$ASSET" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
