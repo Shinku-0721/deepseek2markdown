@@ -375,9 +375,15 @@ async function exportShareDirect(raw, format) {
   setProgress(5, '请求 API...');
   const payload = await publicDeepSeekClient.fetchShareContent(shareId);
 
-  setProgress(90, '组织文件...');
   const session = ExportCore.createShareSession(payload, shareId);
-  const artifact = await ExportDelivery.createSingleArtifact(format, session, markdownOptions());
+  const options = markdownOptions();
+  if (format === 'markdown') {
+    setProgress(75, '获取上传文件...');
+    options.attachments = await publicDeepSeekClient.fetchUploadedFiles(session);
+  }
+
+  setProgress(90, '组织文件...');
+  const artifact = await ExportDelivery.createSingleArtifact(format, session, options);
   const { sizeBytes } = await DownloadClient.download(artifact);
   setProgress(100, `导出完成 · ${artifact.filename} · ${Math.round(sizeBytes / 1024)} KB`);
 }

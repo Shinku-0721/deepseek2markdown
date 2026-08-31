@@ -8,6 +8,7 @@ DeepSeek to Markdown 是一个基于 Manifest V3 的浏览器扩展，可将 Dee
 - 将账号下的全部对话按目录组织并导出为 ZIP。
 - 导出 DeepSeek 公开分享链接，无需先打开对应对话。
 - 保留思考过程、网络搜索结果和消息分支，并提供 Markdown 展示选项。
+- Markdown 导出会同时获取会话中的历史上传文件，保存到独立 `Files` 目录并生成相对引用。
 - 全量导出采用受限并发、固定请求间隔和分页间隔，逐会话写入 ZIP；单个会话请求失败时继续处理其余会话。
 - 按会话更新时间复用本地历史缓存，并以固定窗口批量读取，支持更快的增量导出和中断接续。
 - 文件在浏览器本地生成，不依赖额外的导出服务。
@@ -54,14 +55,18 @@ DeepSeek to Markdown 是一个基于 Manifest V3 的浏览器扩展，可将 Dee
 
 DeepSeek 正文中的 `[reference:N]` 会转换为指向对应搜索文件的 Wiki 链接。关闭网络搜索后，不生成 `Search` 文件，并清理正文中的相关引用标记。
 
+会话中仍可访问的上传文件会写入 `Files` 目录，并在主 Markdown 开头的“上传文件”章节中引用。单个文件签名过期或下载失败时不会中断整个会话导出，Markdown 会保留对应的失败说明。JSON 导出不额外下载文件，仍保存接口返回的原始字段。
+
 ## 输出结构
 
-没有搜索附件的单会话 Markdown 直接输出为 `.md`；单会话 JSON 直接输出为 `.json`。当单会话 Markdown 包含搜索文件时，输出标题同名 ZIP：
+没有 `Search` 或 `Files` 关联资源的单会话 Markdown 直接输出为 `.md`；单会话 JSON 直接输出为 `.json`。当单会话 Markdown 包含关联资源时，输出标题同名 ZIP：
 
 ```text
 会话标题.zip
 └─ 会话标题/
    ├─ 会话标题.md
+   ├─ Files/
+   │  └─ 实验报告.pdf
    └─ Search/
       ├─ 2-3.md
       └─ 2-5.md
@@ -77,12 +82,14 @@ DeepSeek 正文中的 `[reference:N]` 会转换为指向对应搜索文件的 Wi
 - `storage`：保存 Markdown 选项和全量导出的会话历史缓存。
 - `unlimitedStorage`：解除扩展本地存储的默认容量限制，以保存较大的历史缓存。
 - `https://chat.deepseek.com/*`：请求 DeepSeek 的会话、历史记录和公开分享接口。
+- `https://files.deepseeksvc.com/*`：在 Markdown 导出期间获取会话中仍可访问的历史上传文件。
 
 登录凭证仅保存在当前 DeepSeek 标签页的内存中，不写入 `chrome.storage`。成功获取的会话历史会保存在扩展本地存储中，用于后续增量导出和中断接续，并在扩展被移除时一并删除。导出内容始终在浏览器本地整理和压缩；扩展不包含后端服务，也不会把对话发送给开发者或其他自建服务。
 
 ## 注意事项
 
-- 全量导出依赖 DeepSeek 当前网页接口，DeepSeek 更新接口后可能需要同步适配。
+- 全量导出及上传文件获取依赖 DeepSeek 当前网页接口，DeepSeek 更新接口后可能需要同步适配。
+- 上传文件使用会话响应中的临时签名访问；签名失效时会在 Markdown 中记录失败，但不会阻止其余内容导出。
 - 页面刷新或扩展重新加载后，需要打开任意 DeepSeek 对话，让页面发起一次请求后才能执行全量导出。
 - 网络异常或接口限流会按递增间隔自动重试；多次失败的单个会话会计入失败数量，其余会话仍会继续导出。再次执行时，扩展只需补取失败或已经变化的会话。
 - 会话更新时间缺失、缓存不可用或缓存版本不匹配时，扩展会直接请求对应历史，不会使用无法确认有效性的缓存。
@@ -103,13 +110,15 @@ node --check lib/export-delivery.js
 node --check lib/download-client.js
 node --check lib/injected.js
 node --check lib/history-cache.js
+node --check lib/all-export.js
 ```
 
 主要模块：
 
-- `content.js`：协调当前、全量和分享导出，并维护任务进度。
-- `lib/deepseek-client.js`：封装 DeepSeek 请求、分页、超时与重试。
-- `lib/markdown-export.js`：生成 Markdown 正文和搜索附件。
+- `content.js`：连接导出模块与浏览器消息、任务状态和下载行为。
+- `lib/all-export.js`：协调全量导出的列表、缓存、请求调度、附件和顺序归档。
+- `lib/deepseek-client.js`：封装 DeepSeek 请求、分页、上传文件、超时与重试。
+- `lib/markdown-export.js`：生成 Markdown 正文、搜索文件和上传文件引用。
 - `lib/export-core.js`：统一会话数据和导出格式。
 - `lib/export-delivery.js`：生成单文件或 ZIP 归档。
 - `lib/download-client.js`：在当前页面上下文触发本地下载。

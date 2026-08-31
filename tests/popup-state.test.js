@@ -148,3 +148,105 @@ test('popup 初始化时恢复正在进行的导出状态并禁用重复操作',
     assert.equal(byId(id).disabled, true, `${id} 应在导出期间禁用`);
   }
 });
+
+test('非 DeepSeek 标签页的分享 Markdown 导出也会拉取上传文件', async () => {
+  const elements = new Map();
+  /** 按 ID 惰性创建并复用测试元素。 */
+  const byId = id => {
+    if (!elements.has(id)) elements.set(id, createElement(id));
+    return elements.get(id);
+  };
+  byId('includeThinking').checked = true;
+  byId('includeSearch').checked = true;
+  byId('branchLatest').checked = true;
+  byId('shareInput').value = 'share-123';
+
+  const uploadedFiles = [{
+    fileName: '附件.pdf',
+    content: new Uint8Array([1, 2, 3]),
+    mimeType: 'application/pdf',
+  }];
+  let fetchShareCalls = 0;
+  let fetchUploadedFileCalls = 0;
+  let artifactOptions = null;
+  const context = {
+    console,
+    setTimeout,
+    clearTimeout,
+    document: { getElementById: byId },
+    chrome: {
+      runtime: {
+        lastError: null,
+        onMessage: { addListener() {} },
+      },
+      storage: {
+        local: {
+          async get() {
+            return {};
+          },
+          async set() {},
+        },
+        onChanged: { addListener() {} },
+      },
+      tabs: {
+        async query() {
+          return [{ id: 9, url: 'https://example.com/' }];
+        },
+      },
+    },
+    DeepSeekClient: {
+      createDeepSeekClient() {
+        return {
+          async fetchShareContent() {
+            fetchShareCalls++;
+            return { data: { biz_data: { title: '分享会话', messages: [] } } };
+          },
+          async fetchUploadedFiles() {
+            fetchUploadedFileCalls++;
+            return uploadedFiles;
+          },
+        };
+      },
+    },
+    DeepSeekExportCore: {
+      DEFAULT_MARKDOWN_OPTIONS: {
+        includeThinking: true,
+        includeSearch: true,
+        branchMode: 'latest',
+      },
+      parseShareId(raw) {
+        return raw;
+      },
+      createShareSession(payload) {
+        return payload.data.biz_data;
+      },
+    },
+    DeepSeekExportDelivery: {
+      async createSingleArtifact(_format, _session, options) {
+        artifactOptions = options;
+        return { filename: 'share.zip' };
+      },
+    },
+    DeepSeekDownloadClient: {
+      async download() {
+        return { sizeBytes: 1234 };
+      },
+    },
+  };
+  context.globalThis = context;
+
+  vm.runInNewContext(
+    fs.readFileSync(require.resolve('../popup/popup.js'), 'utf8'),
+    context,
+    { filename: 'popup.js' },
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  await elements.get('btnShareMd').listeners.get('click')();
+
+  assert.equal(fetchShareCalls, 1);
+  assert.equal(fetchUploadedFileCalls, 1);
+  assert.deepEqual(artifactOptions.attachments, uploadedFiles);
+  assert.match(elements.get('progressText').textContent, /导出完成/);
+});
