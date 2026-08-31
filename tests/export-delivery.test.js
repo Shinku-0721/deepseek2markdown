@@ -72,7 +72,7 @@ function assertWindowsSafePaths(paths) {
       assert.doesNotMatch(segment, /[ .]$/, `路径段包含尾部点或空格: ${segment}`);
       assert.doesNotMatch(
         segment,
-        /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i,
+        /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i,
         `路径段使用 Windows 设备名: ${segment}`,
       );
       assert.ok(segment.length > 0, '路径段不能为空');
@@ -171,6 +171,8 @@ test('长标题、规范化冲突和设备名始终生成 Windows 安全归档�
     createSession('con.'),
     createSession('FILE'),
     createSession('file'),
+    createSession('COM¹'),
+    createSession('LPT².txt'),
   ];
   sessions.forEach((session, index) => {
     session.id = `safe-path-${index}`;
