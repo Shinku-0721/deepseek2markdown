@@ -1,23 +1,61 @@
-# DeepSeek to Markdown
+<div align="center">
+  <img src="icons/icon128.png" width="112" height="112" alt="DeepSeek to Markdown 项目图标">
+  <h1>DeepSeek to Markdown</h1>
+  <p><strong>将 DeepSeek 对话完整导出为 Markdown 或 JSON</strong></p>
+  <p>支持当前对话、全部历史和公开分享链接，所有内容均在浏览器本地处理。</p>
+  <p>
+    <a href="manifest.json"><img src="https://img.shields.io/badge/version-1.2.1-2563EB?style=flat-square" alt="当前版本 1.2.1"></a>
+    <a href="https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3"><img src="https://img.shields.io/badge/Manifest-V3-0F766E?style=flat-square&logo=googlechrome&logoColor=white" alt="Manifest V3"></a>
+    <a href="#安装"><img src="https://img.shields.io/badge/browser-Edge%20%7C%20Chrome-7C3AED?style=flat-square" alt="支持 Edge 和 Chrome"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-374151?style=flat-square" alt="MIT License"></a>
+  </p>
+</div>
 
-DeepSeek to Markdown 是一个基于 Manifest V3 的浏览器扩展，可将 DeepSeek 当前对话、全部对话或公开分享链接导出为 Markdown 或 JSON。扩展适用于 Chromium 内核浏览器，包括 Microsoft Edge 和 Google Chrome。
+## 快速入口
 
-## 功能
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="#安装"><strong>安装扩展</strong></a><br>
+      <sub>下载源码，通过浏览器开发者模式直接加载。</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="#使用"><strong>使用指南</strong></a><br>
+      <sub>导出当前对话、全部历史或公开分享链接。</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/JSON_SCHEMA.md"><strong>JSON 数据结构</strong></a><br>
+      <sub>查看 JSON 导出格式与字段说明。</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="https://github.com/Shinku-0721/deepseek2markdown/issues"><strong>问题反馈</strong></a><br>
+      <sub>报告导出异常、兼容性问题或提出建议。</sub>
+    </td>
+  </tr>
+</table>
 
-- 导出当前对话为 Markdown 或 JSON。
-- 将账号下的全部对话按目录组织并导出为 ZIP。
-- 导出 DeepSeek 公开分享链接，无需先打开对应对话。
-- 保留思考过程、网络搜索结果和消息分支，并提供 Markdown 展示选项。
-- Markdown 导出会同时获取会话中的历史上传文件，保存到独立 `Files` 目录并生成相对引用。
-- 全量导出采用受限并发、固定请求间隔和分页间隔，逐会话写入 ZIP；单个会话请求失败时继续处理其余会话。
-- 按会话更新时间复用本地历史缓存，并以固定窗口批量读取，支持更快的增量导出和中断接续。
-- 文件在浏览器本地生成，不依赖额外的导出服务。
+## 功能特性
+
+- **多种导出来源**：支持当前对话、账号下的全部对话和 DeepSeek 公开分享链接。
+- **两种输出格式**：可导出便于阅读的 Markdown，或保留完整字段的 JSON。
+- **完整内容保留**：可选保留思考过程、网络搜索结果和全部消息分支。
+- **关联文件归档**：Markdown 导出会下载仍可访问的历史上传文件，并生成相对引用。
+- **高效全量导出**：采用受限并发、请求间隔和分页间隔，按会话目录生成 ZIP。
+- **增量缓存与接续**：按更新时间复用本地历史缓存，失败或中断后可继续导出。
+- **本地优先**：文件仅在浏览器本地整理和生成，不依赖额外的导出服务。
 
 ## 安装
 
-本项目目前通过开发者模式加载，无需构建。
+本项目无需构建，可直接通过浏览器开发者模式加载。
 
-1. 下载或克隆本仓库。
+1. [下载源码 ZIP](https://github.com/Shinku-0721/deepseek2markdown/archive/refs/heads/main.zip)，或克隆本仓库：
+
+   ```bash
+   git clone https://github.com/Shinku-0721/deepseek2markdown.git
+   ```
+
 2. 在 Edge 打开 `edge://extensions`，或在 Chrome 打开 `chrome://extensions`。
 3. 启用“开发人员模式”或“开发者模式”。
 4. 选择“加载解压缩的扩展”或“加载已解压的扩展程序”，然后选择仓库根目录。
@@ -115,17 +153,19 @@ node --check lib/all-export.js
 
 主要模块：
 
-- `content.js`：连接导出模块与浏览器消息、任务状态和下载行为。
-- `lib/all-export.js`：协调全量导出的列表、缓存、请求调度、附件和顺序归档。
-- `lib/deepseek-client.js`：封装 DeepSeek 请求、分页、上传文件、超时与重试。
-- `lib/markdown-export.js`：生成 Markdown 正文、搜索文件和上传文件引用。
-- `lib/export-core.js`：统一会话数据和导出格式。
-- `lib/export-delivery.js`：生成单文件或 ZIP 归档。
-- `lib/download-client.js`：在当前页面上下文触发本地下载。
-- `lib/injected.js`：在 DeepSeek 页面内观察当前请求使用的 Bearer Token。
-- `lib/history-cache.js`：按会话更新时间维护增量历史缓存。
-- `popup/`：扩展弹窗界面和交互。
-- `tests/`：导出规则、归档、下载和状态测试。
+| 路径 | 职责 |
+| --- | --- |
+| `content.js` | 连接导出模块与浏览器消息、任务状态和下载行为 |
+| `lib/all-export.js` | 协调全量导出的列表、缓存、请求调度、附件和顺序归档 |
+| `lib/deepseek-client.js` | 封装 DeepSeek 请求、分页、上传文件、超时与重试 |
+| `lib/markdown-export.js` | 生成 Markdown 正文、搜索文件和上传文件引用 |
+| `lib/export-core.js` | 统一会话数据和导出格式 |
+| `lib/export-delivery.js` | 生成单文件或 ZIP 归档 |
+| `lib/download-client.js` | 在当前页面上下文触发本地下载 |
+| `lib/injected.js` | 在 DeepSeek 页面内观察当前请求使用的 Bearer Token |
+| `lib/history-cache.js` | 按会话更新时间维护增量历史缓存 |
+| `popup/` | 扩展弹窗界面和交互 |
+| `tests/` | 导出规则、归档、下载和状态测试 |
 
 ZIP 压缩使用本地固定的 [fflate](https://github.com/101arrowz/fflate) 0.8.3，采用 MIT License。
 
