@@ -135,10 +135,14 @@ async function getActiveTab() {
  * 判断标签页是否属于允许访问的 DeepSeek 站点。
  *
  * @param {chrome.tabs.Tab|undefined} tab 待检查标签页。
- * @returns {boolean} URL 以 DeepSeek HTTPS origin 开头时返回 true。
+ * @returns {boolean} URL 可解析且 origin 精确匹配时返回 true。
  */
 function isDeepSeekTab(tab) {
-  return Boolean(tab?.url?.startsWith('https://chat.deepseek.com'));
+  try {
+    return new URL(tab?.url).origin === 'https://chat.deepseek.com';
+  } catch (_) {
+    return false;
+  }
 }
 
 /**
@@ -155,6 +159,18 @@ async function sendToContent(message, tab = null) {
   const response = await chrome.tabs.sendMessage(targetTab.id, message);
   if (response?.ok === false) throw new Error(response.error || '导出失败');
   return response;
+}
+
+/**
+ * 判断消息发送是否在到达内容脚本前失败。
+ *
+ * 仅该错误可安全回退直连；端口提前关闭可能表示任务已被接收，不能再次执行。
+ *
+ * @param {*} error chrome.tabs.sendMessage 抛出的错误。
+ * @returns {boolean} 明确不存在消息接收端时返回 true。
+ */
+function isMissingContentScriptError(error) {
+  return /(?:receiving end does not exist|no receiving end)/i.test(String(error?.message || error));
 }
 
 /**
@@ -342,14 +358,25 @@ async function handleShareExport(format) {
   setExportBusy(true);
 
   try {
-    const tab = await getActiveTab();
+    let tab = null;
+    try {
+      tab = await getActiveTab();
+    } catch (_) {
+      // 分享接口不依赖当前标签页，查询失败时仍可由 Popup 直连。
+    }
+
     if (isDeepSeekTab(tab)) {
-      await sendToContent({
-        action: 'exportShare',
-        url: raw,
-        format,
-        options: markdownOptions(),
-      }, tab);
+      try {
+        await sendToContent({
+          action: 'exportShare',
+          url: raw,
+          format,
+          options: markdownOptions(),
+        }, tab);
+      } catch (error) {
+        if (!isMissingContentScriptError(error)) throw error;
+        await exportShareDirect(raw, format);
+      }
     } else {
       await exportShareDirect(raw, format);
     }

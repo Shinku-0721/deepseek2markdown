@@ -61,6 +61,129 @@ function createElement(id) {
   };
 }
 
+/** 创建可观测分享消息转发与 Popup 直连行为的 VM 环境。 */
+function createShareHarness({
+  tabUrl = 'https://example.com/',
+  contentResponder = async message => message.action === 'getStatus'
+    ? { hasToken: false, sessionId: null, exportState: { status: 'idle' } }
+    : { ok: true },
+} = {}) {
+  const elements = new Map();
+  const byId = id => {
+    if (!elements.has(id)) elements.set(id, createElement(id));
+    return elements.get(id);
+  };
+  byId('includeThinking').checked = true;
+  byId('includeSearch').checked = true;
+  byId('branchLatest').checked = true;
+  byId('shareInput').value = 'share-123';
+
+  const contentMessages = [];
+  const directFormats = [];
+  let directFetchCalls = 0;
+  let uploadedFileCalls = 0;
+  let downloadCalls = 0;
+  const context = {
+    console,
+    setTimeout,
+    clearTimeout,
+    URL,
+    document: { getElementById: byId },
+    chrome: {
+      runtime: {
+        lastError: null,
+        onMessage: { addListener() {} },
+      },
+      storage: {
+        local: {
+          async get() {
+            return {};
+          },
+          async set() {},
+        },
+        onChanged: { addListener() {} },
+      },
+      tabs: {
+        async query() {
+          return [{ id: 9, url: tabUrl }];
+        },
+        async sendMessage(_tabId, message) {
+          contentMessages.push(message);
+          return contentResponder(message);
+        },
+      },
+    },
+    DeepSeekClient: {
+      createDeepSeekClient() {
+        return {
+          async fetchShareContent() {
+            directFetchCalls++;
+            return { data: { biz_data: { title: '分享会话', messages: [] } } };
+          },
+          async fetchUploadedFiles() {
+            uploadedFileCalls++;
+            return [];
+          },
+        };
+      },
+    },
+    DeepSeekExportCore: {
+      DEFAULT_MARKDOWN_OPTIONS: {
+        includeThinking: true,
+        includeSearch: true,
+        branchMode: 'latest',
+      },
+      parseShareId(raw) {
+        return raw;
+      },
+      createShareSession(payload) {
+        return payload.data.biz_data;
+      },
+    },
+    DeepSeekExportDelivery: {
+      async createSingleArtifact(format) {
+        directFormats.push(format);
+        return { filename: `share.${format === 'json' ? 'json' : 'md'}` };
+      },
+    },
+    DeepSeekDownloadClient: {
+      async download() {
+        downloadCalls++;
+        return { sizeBytes: 1234 };
+      },
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    fs.readFileSync(require.resolve('../popup/popup.js'), 'utf8'),
+    context,
+    { filename: 'popup.js' },
+  );
+
+  return {
+    contentMessages,
+    directFormats,
+    elements,
+    get directFetchCalls() {
+      return directFetchCalls;
+    },
+    get downloadCalls() {
+      return downloadCalls;
+    },
+    get uploadedFileCalls() {
+      return uploadedFileCalls;
+    },
+    async settle() {
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    async clickShare(format) {
+      const id = format === 'markdown' ? 'btnShareMd' : 'btnShareJson';
+      await elements.get(id).listeners.get('click')();
+    },
+  };
+}
+
 test('popup 初始化时恢复正在进行的导出状态并禁用重复操作', async () => {
   const elements = new Map();
   /** 按 ID 惰性创建并复用测试元素。 */
@@ -72,6 +195,7 @@ test('popup 初始化时恢复正在进行的导出状态并禁用重复操作',
     console,
     setTimeout,
     clearTimeout,
+    URL,
     document: { getElementById: byId },
     chrome: {
       runtime: {
@@ -149,6 +273,79 @@ test('popup 初始化时恢复正在进行的导出状态并禁用重复操作',
   }
 });
 
+test('精确 DeepSeek origin 使用内容脚本执行分享导出', async () => {
+  const harness = createShareHarness({
+    tabUrl: 'https://chat.deepseek.com/a/chat/s/test',
+  });
+  await harness.settle();
+
+  await harness.clickShare('markdown');
+
+  assert.deepEqual(
+    harness.contentMessages.map(message => message.action),
+    ['getStatus', 'exportShare'],
+  );
+  assert.equal(harness.directFetchCalls, 0);
+  assert.equal(harness.downloadCalls, 0);
+});
+
+test('DeepSeek 前缀仿冒域名不视为 DeepSeek 标签页', async () => {
+  const harness = createShareHarness({
+    tabUrl: 'https://chat.deepseek.com.example.com/a/chat/s/test',
+  });
+  await harness.settle();
+
+  await harness.clickShare('json');
+
+  assert.deepEqual(harness.contentMessages, []);
+  assert.equal(harness.directFetchCalls, 1);
+  assert.deepEqual(harness.directFormats, ['json']);
+  assert.equal(harness.downloadCalls, 1);
+});
+
+test('DeepSeek 标签页无内容脚本接收端时 Markdown 和 JSON 均回退直连', async () => {
+  for (const format of ['markdown', 'json']) {
+    const harness = createShareHarness({
+      tabUrl: 'https://chat.deepseek.com/',
+      contentResponder: async () => {
+        throw new Error('Could not establish connection. Receiving end does not exist.');
+      },
+    });
+    await harness.settle();
+
+    await harness.clickShare(format);
+
+    assert.equal(
+      harness.contentMessages.filter(message => message.action === 'exportShare').length,
+      1,
+    );
+    assert.equal(harness.directFetchCalls, 1);
+    assert.deepEqual(harness.directFormats, [format]);
+    assert.equal(harness.uploadedFileCalls, format === 'markdown' ? 1 : 0);
+    assert.equal(harness.downloadCalls, 1);
+  }
+});
+
+test('内容脚本返回业务失败时不回退 Popup 直连', async () => {
+  const harness = createShareHarness({
+    tabUrl: 'https://chat.deepseek.com/',
+    contentResponder: async message => message.action === 'getStatus'
+      ? { hasToken: true, sessionId: null, exportState: { status: 'idle' } }
+      : { ok: false, error: '分享业务失败' },
+  });
+  await harness.settle();
+
+  await harness.clickShare('json');
+
+  assert.equal(
+    harness.contentMessages.filter(message => message.action === 'exportShare').length,
+    1,
+  );
+  assert.equal(harness.directFetchCalls, 0);
+  assert.equal(harness.downloadCalls, 0);
+  assert.match(harness.elements.get('progressText').textContent, /分享业务失败/);
+});
+
 test('非 DeepSeek 标签页的分享 Markdown 导出也会拉取上传文件', async () => {
   const elements = new Map();
   /** 按 ID 惰性创建并复用测试元素。 */
@@ -173,6 +370,7 @@ test('非 DeepSeek 标签页的分享 Markdown 导出也会拉取上传文件', 
     console,
     setTimeout,
     clearTimeout,
+    URL,
     document: { getElementById: byId },
     chrome: {
       runtime: {

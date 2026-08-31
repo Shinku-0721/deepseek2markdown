@@ -57,6 +57,45 @@ test('历史请求动态读取 Token，并保留原始 biz_data 字段', async (
   assert.deepEqual(first.messages, first.chat_messages);
 });
 
+test('会话列表和历史请求拒绝 HTTP 200 业务错误', async () => {
+  const responses = [
+    { code: 1200, msg: '登录状态失效' },
+    { code: 1404, msg: '会话不存在' },
+  ];
+  const client = createDeepSeekClient({
+    fetch: async () => jsonResponse(responses.shift()),
+  });
+
+  await assert.rejects(client.listAllSessions(), /API 错误: 登录状态失效/);
+  await assert.rejects(client.getHistoryData('missing-session'), /API 错误: 会话不存在/);
+});
+
+test('会话列表和历史请求拒绝缺失必要数据容器的成功响应', async () => {
+  const responses = [
+    { code: 0, data: { biz_data: {} } },
+    { code: 0, data: { biz_data: { title: '缺少消息数组' } } },
+  ];
+  const client = createDeepSeekClient({
+    fetch: async () => jsonResponse(responses.shift()),
+  });
+
+  await assert.rejects(client.listAllSessions(), /响应结构错误.*chat_sessions/);
+  await assert.rejects(client.getHistoryData('malformed-session'), /响应结构错误.*消息数组/);
+});
+
+test('会话列表和历史请求接受合法空数据', async () => {
+  const responses = [
+    { code: 0, data: { biz_data: { chat_sessions: [], has_more: false } } },
+    { code: 0, data: { biz_data: { chat_messages: [] } } },
+  ];
+  const client = createDeepSeekClient({
+    fetch: async () => jsonResponse(responses.shift()),
+  });
+
+  assert.deepEqual(await client.listAllSessions(), []);
+  assert.deepEqual((await client.getHistoryData('empty-session')).messages, []);
+});
+
 test('历史上传文件使用签名参数请求真实文件服务并按 ID 去重', async () => {
   const requests = [];
   const bytes = new Uint8Array([37, 80, 68, 70]);
@@ -167,6 +206,53 @@ test('单个历史附件不可下载时返回错误结果而不中断其他文�
   assert.equal(files.length, 2);
   assert.match(files[0].error, /缺少文件下载地址/);
   assert.match(files[1].error, /HTTP 404 Not Found/);
+});
+
+test('附件签名被文件服务拒绝时标记可刷新，并支持只请求指定附件', async () => {
+  const requests = [];
+  const session = {
+    attachments: [
+      {
+        id: 'file-expired',
+        status: 'SUCCESS',
+        fileName: '过期.pdf',
+        signedPath: '/file?file_id=expired&state=old-state',
+      },
+      {
+        id: 'file-valid',
+        status: 'SUCCESS',
+        fileName: '有效.pdf',
+        signedPath: '/file?file_id=valid&state=current-state',
+      },
+    ],
+  };
+  const client = createDeepSeekClient({
+    fetch: async (url) => {
+      requests.push(url);
+      const fileId = new URL(url).searchParams.get('file_id');
+      if (fileId === 'expired') {
+        return jsonResponse({}, { ok: false, status: 403, statusText: 'Forbidden' });
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: { get: () => 'application/pdf' },
+        arrayBuffer: async () => new Uint8Array([1]).buffer,
+      };
+    },
+  });
+
+  const first = await client.fetchUploadedFiles(session);
+  assert.equal(first[0].refreshable, true);
+  assert.match(first[0].error, /HTTP 403 Forbidden/);
+  assert.equal(first[1].refreshable, undefined);
+
+  requests.length = 0;
+  const selected = await client.fetchUploadedFiles(session, { fileIds: ['file-valid'] });
+  assert.deepEqual(selected.map(file => file.id), ['file-valid']);
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0]).searchParams.get('file_id'), 'valid');
 });
 
 test('会话分页使用 DeepSeek 复合游标并报告累计进度', async () => {

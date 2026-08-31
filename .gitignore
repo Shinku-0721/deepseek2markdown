@@ -1,5 +1,5 @@
-docs/JSON_SCHEMA.md
-docs/*.json
+docs/*
+!docs/JSON_SCHEMA.md
 
 icons/icon-source.png
 

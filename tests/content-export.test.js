@@ -21,6 +21,7 @@ function createHarness({
   blockAllExport = false,
   allExportError = null,
   downloadError = null,
+  historyError = null,
   uploadedFiles = [],
   withToken = true,
 } = {}) {
@@ -87,6 +88,7 @@ function createHarness({
       createDeepSeekClient() {
         return {
           async getHistoryData(id) {
+            if (historyError) throw historyError;
             return { id, title: '当前会话', messages: [] };
           },
           async fetchUploadedFiles() {
@@ -297,6 +299,23 @@ test('缺少页面凭证时在调用全量导出 module 前失败', async () => 
   assert.equal(response.ok, false);
   assert.match(response.error, /未获取到登录凭证/);
   assert.equal(harness.allExportCalls, 0);
+  assert.equal(harness.downloadCalls, 0);
+});
+
+test('当前会话历史业务错误通过状态通道返回且不触发下载', async () => {
+  const harness = createHarness({ historyError: new Error('API 错误: 会话不存在') });
+
+  const response = await send(harness.listener, {
+    action: 'exportCurrent',
+    format: 'json',
+    options: {},
+  });
+  const status = readStatus(harness.listener);
+
+  assert.equal(response.ok, false);
+  assert.match(response.error, /API 错误: 会话不存在/);
+  assert.equal(status.exportState.status, 'error');
+  assert.match(status.exportState.message, /会话不存在/);
   assert.equal(harness.downloadCalls, 0);
 });
 

@@ -63,6 +63,27 @@ async function unzipText(artifact) {
   );
 }
 
+/** 断言 ZIP 路径的每一段都可安全落盘到 Windows。 */
+function assertWindowsSafePaths(paths) {
+  const normalizedPaths = new Set();
+  for (const path of paths) {
+    const normalizedSegments = path.split('/').map(segment => {
+      assert.ok(segment.length <= 100, `路径段超过 100 字符: ${segment}`);
+      assert.doesNotMatch(segment, /[ .]$/, `路径段包含尾部点或空格: ${segment}`);
+      assert.doesNotMatch(
+        segment,
+        /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i,
+        `路径段使用 Windows 设备名: ${segment}`,
+      );
+      assert.ok(segment.length > 0, '路径段不能为空');
+      return segment.replace(/[ .]+$/g, '').toLocaleLowerCase();
+    });
+    const normalizedPath = normalizedSegments.join('/');
+    assert.equal(normalizedPaths.has(normalizedPath), false, `Windows 规范化后路径冲突: ${path}`);
+    normalizedPaths.add(normalizedPath);
+  }
+}
+
 test('单会话 Markdown 存在 Search 文件时打包为标题同名 ZIP', async () => {
   const artifact = await createSingleArtifact('markdown', createSession());
   const files = await unzipText(artifact);
@@ -135,6 +156,55 @@ test('全会话始终打包，并为重名会话生成独立目录', async () =>
     '同名会话 (2)/同名会话.json',
     '同名会话/同名会话.json',
   ]);
+});
+
+test('长标题、规范化冲突和设备名始终生成 Windows 安全归档路径', async () => {
+  const truncatesAtDot = 'a'.repeat(99) + '.tail';
+  const sessions = [
+    createSession(truncatesAtDot),
+    createSession(truncatesAtDot),
+    createSession('Report'),
+    createSession('report. '),
+    createSession('CON'),
+    createSession('con.'),
+  ];
+  sessions.forEach((session, index) => {
+    session.id = `safe-path-${index}`;
+  });
+
+  const artifact = await createArchiveArtifact('json', sessions, {}, 'safe-paths.zip');
+  const files = await unzipText(artifact);
+  const paths = Object.keys(files);
+
+  assert.equal(paths.length, sessions.length);
+  assertWindowsSafePaths(paths);
+  assert.equal(new Set(paths.map(path => path.split('/')[0].toLocaleLowerCase())).size, sessions.length);
+});
+
+test('长附件重名与单会话文件名保持扩展名和单段长度上限', async () => {
+  const longAttachmentName = 'b'.repeat(120) + '.pdf';
+  const artifact = await createSingleArtifact('markdown', createSession('附件路径'), {
+    includeSearch: false,
+    attachments: [
+      { fileName: longAttachmentName, content: new Uint8Array([1]) },
+      { fileName: longAttachmentName, content: new Uint8Array([2]) },
+      { fileName: 'NUL.txt', content: new Uint8Array([3]) },
+    ],
+  });
+  const files = await unzipText(artifact);
+  const paths = Object.keys(files);
+  const attachmentSegments = paths
+    .filter(path => path.includes('/Files/'))
+    .map(path => path.split('/').at(-1));
+
+  assertWindowsSafePaths(paths);
+  assert.equal(attachmentSegments.length, 3);
+  assert.equal(attachmentSegments.filter(name => name.endsWith('.pdf')).length, 2);
+  assert.ok(attachmentSegments.some(name => / \(2\)\.pdf$/.test(name)));
+
+  const single = await createSingleArtifact('json', createSession('c'.repeat(150)));
+  assert.ok(single.filename.length <= 100);
+  assert.doesNotMatch(single.filename, /[ .]$/);
 });
 
 test('流式归档允许逐会话写入并以 Blob 保存压缩分块', async () => {
