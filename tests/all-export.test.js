@@ -304,6 +304,84 @@ test('Markdown 缓存签名过期时刷新历史、只重试失败附件并接�
   assert.equal(archiveFactory.archives[0].sessions[0].marker, 'fresh');
 });
 
+test('Markdown 无 ID 附件签名过期时按遍历位置刷新一次', async () => {
+  const session = { id: 'cached', title: '已缓存', updated_at: 1 };
+  const oldHistory = {
+    marker: 'old',
+    messages: [],
+    attachments: [{ fileName: '无 ID.pdf', signedPath: '/file?state=old' }],
+  };
+  const freshHistory = {
+    marker: 'fresh',
+    messages: [],
+    attachments: [{ fileName: '无 ID.pdf', signedPath: '/file?state=fresh' }],
+  };
+  const cache = createMemoryCache(new Map([[cacheKey(session), oldHistory]]));
+  const archiveFactory = createArchiveFactory();
+  const harness = createHarness({
+    sessions: [session],
+    historyCache: cache,
+    archiveFactory,
+    historyLoader: async () => freshHistory,
+    uploadedFileLoader: async (exportedSession, selection) => {
+      if (selection) {
+        assert.equal(exportedSession.marker, 'fresh');
+        assert.deepEqual(selection.attachmentIndexes, [0]);
+        return [{
+          id: null,
+          attachmentIndex: 0,
+          fileName: '无 ID.pdf',
+          content: new Uint8Array([1]),
+        }];
+      }
+      return [{
+        id: null,
+        attachmentIndex: 0,
+        fileName: '无 ID.pdf',
+        error: 'HTTP 403 Forbidden',
+        refreshable: true,
+      }];
+    },
+  });
+
+  const result = await harness.allExport.run('markdown');
+  const [attachment] = archiveFactory.archives[0].sessionOptions[0].attachments;
+
+  assert.deepEqual(result.summary, { cacheHitCount: 1, networkCount: 1, failedCount: 0 });
+  assert.equal(attachment.error, undefined);
+  assert.equal(harness.historyCalls, 1);
+  assert.equal(harness.uploadedFileCalls, 2);
+});
+
+test('Markdown 附件刷新成功但重试仍失败时不再重复刷新', async () => {
+  const session = { id: 'cached', title: '已缓存', updated_at: 1 };
+  const oldHistory = { marker: 'old', messages: [] };
+  const freshHistory = { marker: 'fresh', messages: [] };
+  const cache = createMemoryCache(new Map([[cacheKey(session), oldHistory]]));
+  const archiveFactory = createArchiveFactory();
+  const harness = createHarness({
+    sessions: [session],
+    historyCache: cache,
+    archiveFactory,
+    historyLoader: async () => freshHistory,
+    uploadedFileLoader: async (_exportedSession, selection) => [{
+      id: 'file-expired',
+      fileName: '过期.pdf',
+      error: selection ? 'HTTP 403 Forbidden after refresh' : 'HTTP 403 Forbidden',
+      refreshable: true,
+    }],
+  });
+
+  const result = await harness.allExport.run('markdown');
+  const [attachment] = archiveFactory.archives[0].sessionOptions[0].attachments;
+
+  assert.deepEqual(result.summary, { cacheHitCount: 1, networkCount: 1, failedCount: 0 });
+  assert.match(attachment.error, /after refresh/);
+  assert.equal(harness.historyCalls, 1);
+  assert.equal(harness.uploadedFileCalls, 2);
+  assert.equal(cache.writes, 1);
+});
+
 test('Markdown 附件凭据刷新失败时保留可诊断的单文件错误', async () => {
   const session = { id: 'cached', title: '已缓存', updated_at: 1 };
   const cache = createMemoryCache(new Map([[
@@ -407,6 +485,68 @@ test('最多两个历史请求并发，全局启动间隔为 800ms 且慢请求�
   assert.equal(maxActive, 2);
   assert.deepEqual(startedBeforeRelease, sessions.map(session => session.id));
   assert.deepEqual(waits, [800, 800, 800, 800]);
+});
+
+test('附件凭据刷新与普通历史请求共享两个并发槽', async () => {
+  const sessions = [
+    { id: 'cached', title: '缓存会话', updated_at: 1 },
+    { id: 'network-1', title: '网络会话 1' },
+    { id: 'network-2', title: '网络会话 2' },
+  ];
+  const cache = createMemoryCache(new Map([[
+    cacheKey(sessions[0]),
+    { marker: 'old', messages: [] },
+  ]]));
+  let releaseAttachment;
+  const attachmentGate = new Promise(resolve => {
+    releaseAttachment = resolve;
+  });
+  let releaseHistories;
+  const historyGate = new Promise(resolve => {
+    releaseHistories = resolve;
+  });
+  let active = 0;
+  let maxActive = 0;
+  const started = [];
+  const harness = createHarness({
+    sessions,
+    historyCache: cache,
+    historyLoader: async id => {
+      started.push(id);
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await historyGate;
+      active--;
+      return { marker: id === 'cached' ? 'fresh' : id, messages: [] };
+    },
+    uploadedFileLoader: async (exportedSession, selection) => {
+      if (exportedSession.id !== 'cached') return [];
+      if (!selection) await attachmentGate;
+      return [{
+        id: 'file-expired',
+        fileName: '过期.pdf',
+        ...(selection
+          ? { content: new Uint8Array([1]) }
+          : { error: 'HTTP 403 Forbidden', refreshable: true }),
+      }];
+    },
+  });
+
+  const exporting = harness.allExport.run('markdown');
+  await nextTurn();
+  await nextTurn();
+  assert.deepEqual(new Set(started), new Set(['network-1', 'network-2']));
+  releaseAttachment();
+  await nextTurn();
+
+  const maxBeforeRelease = maxActive;
+  releaseHistories();
+  const result = await exporting;
+
+  assert.ok(maxBeforeRelease <= 2, `历史请求并发数不应超过 2，实际为 ${maxBeforeRelease}`);
+  assert.equal(maxActive, 2);
+  assert.equal(harness.historyCalls, 3);
+  assert.deepEqual(result.summary, { cacheHitCount: 1, networkCount: 3, failedCount: 0 });
 });
 
 test('历史请求乱序完成时仍严格按列表顺序归档', async () => {

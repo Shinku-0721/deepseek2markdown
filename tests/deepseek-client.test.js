@@ -224,13 +224,18 @@ test('附件签名被文件服务拒绝时标记可刷新，并支持只请求�
         fileName: '有效.pdf',
         signedPath: '/file?file_id=valid&state=current-state',
       },
+      {
+        status: 'SUCCESS',
+        fileName: '无 ID.pdf',
+        signedPath: '/file?file_id=idless&state=old-state',
+      },
     ],
   };
   const client = createDeepSeekClient({
     fetch: async (url) => {
       requests.push(url);
       const fileId = new URL(url).searchParams.get('file_id');
-      if (fileId === 'expired') {
+      if (fileId === 'expired' || fileId === 'idless') {
         return jsonResponse({}, { ok: false, status: 403, statusText: 'Forbidden' });
       }
       return {
@@ -247,12 +252,21 @@ test('附件签名被文件服务拒绝时标记可刷新，并支持只请求�
   assert.equal(first[0].refreshable, true);
   assert.match(first[0].error, /HTTP 403 Forbidden/);
   assert.equal(first[1].refreshable, undefined);
+  assert.equal(first[2].id, null);
+  assert.equal(first[2].attachmentIndex, 2);
+  assert.equal(first[2].refreshable, true);
 
   requests.length = 0;
   const selected = await client.fetchUploadedFiles(session, { fileIds: ['file-valid'] });
   assert.deepEqual(selected.map(file => file.id), ['file-valid']);
   assert.equal(requests.length, 1);
   assert.equal(new URL(requests[0]).searchParams.get('file_id'), 'valid');
+
+  requests.length = 0;
+  const selectedIdless = await client.fetchUploadedFiles(session, { attachmentIndexes: [2] });
+  assert.deepEqual(selectedIdless.map(file => file.attachmentIndex), [2]);
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0]).searchParams.get('file_id'), 'idless');
 });
 
 test('会话分页使用 DeepSeek 复合游标并报告累计进度', async () => {

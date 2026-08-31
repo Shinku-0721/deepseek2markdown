@@ -76,7 +76,7 @@ function assertWindowsSafePaths(paths) {
         `路径段使用 Windows 设备名: ${segment}`,
       );
       assert.ok(segment.length > 0, '路径段不能为空');
-      return segment.replace(/[ .]+$/g, '').toLocaleLowerCase();
+      return segment.replace(/[ .]+$/g, '').toLowerCase();
     });
     const normalizedPath = normalizedSegments.join('/');
     assert.equal(normalizedPaths.has(normalizedPath), false, `Windows 规范化后路径冲突: ${path}`);
@@ -159,14 +159,18 @@ test('全会话始终打包，并为重名会话生成独立目录', async () =>
 });
 
 test('长标题、规范化冲突和设备名始终生成 Windows 安全归档路径', async () => {
-  const truncatesAtDot = 'a'.repeat(99) + '.tail';
+  const truncatesAtDot = 'a'.repeat(94) + '.tail';
+  const truncatesAtSpace = 'b'.repeat(94) + ' tail';
   const sessions = [
     createSession(truncatesAtDot),
     createSession(truncatesAtDot),
+    createSession(truncatesAtSpace),
     createSession('Report'),
     createSession('report. '),
     createSession('CON'),
     createSession('con.'),
+    createSession('FILE'),
+    createSession('file'),
   ];
   sessions.forEach((session, index) => {
     session.id = `safe-path-${index}`;
@@ -178,7 +182,12 @@ test('长标题、规范化冲突和设备名始终生成 Windows 安全归档�
 
   assert.equal(paths.length, sessions.length);
   assertWindowsSafePaths(paths);
-  assert.equal(new Set(paths.map(path => path.split('/')[0].toLocaleLowerCase())).size, sessions.length);
+  const directories = paths.map(path => path.split('/')[0]);
+  assert.ok(directories.includes('a'.repeat(94)));
+  assert.ok(directories.includes('b'.repeat(94)));
+  assert.ok(directories.includes('FILE'));
+  assert.ok(directories.includes('file (2)'));
+  assert.equal(new Set(directories.map(name => name.toLowerCase())).size, sessions.length);
 });
 
 test('长附件重名与单会话文件名保持扩展名和单段长度上限', async () => {

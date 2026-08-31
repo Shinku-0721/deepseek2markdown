@@ -378,6 +378,19 @@ test('分支展示可在全部记录与最后一条消息链之间切换', () =>
   assert.match(latest, /最后一次运行回答/);
 });
 
+test('Markdown 会话历史失败时展示 export_error', () => {
+  const bundle = createSessionExport('markdown', {
+    id: 'failed-session',
+    title: '失败会话',
+    messages: [],
+    export_error: 'API 错误: 会话不存在',
+  });
+  const main = bundle.files[0].content;
+
+  assert.match(main, /导出失败/);
+  assert.match(main, /API 错误: 会话不存在/);
+});
+
 test('JSON 将完整 session 原样写入标题同名文件', () => {
   const session = createSession();
   const bundle = createSessionExport('json', session, {
